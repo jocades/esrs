@@ -27,5 +27,15 @@ let a = "outer"
   a
 }
 
+// While
+let i = 0
+while i < 3 {
+  i = i + 1
+}
+i
 
-
+// Function
+fn main() {
+  1
+}
+main()
