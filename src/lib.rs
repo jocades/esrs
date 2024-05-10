@@ -51,7 +51,7 @@ mod ast {
         },
         Get {
             object: Rc<Expr>,
-            prop: Token,
+            name: Token,
         },
         GetComputed {
             object: Rc<Expr>,
@@ -63,6 +63,16 @@ mod ast {
             props: Vec<(Token, Option<Expr>)>,
         },
         Range(Rc<Expr>, Rc<Expr>),
+        Set {
+            object: Rc<Expr>,
+            name: Token,
+            value: Rc<Expr>,
+        },
+        SetComputed {
+            object: Rc<Expr>,
+            prop: Rc<Expr>,
+            value: Rc<Expr>,
+        },
         UnaryOp {
             op: Token,
             rhs: Rc<Expr>,
@@ -224,6 +234,7 @@ mod lexer {
                 ':' => self.add_token(Colon),
                 ';' => self.add_token(Semicolon),
                 '^' => self.add_token(Caret),
+                '?' => self.add_token(Question),
                 // two-character tokens
                 '!' => {
                     if self.matches('=') {
@@ -621,6 +632,20 @@ mod parser {
                             value: Rc::new(value),
                         });
                     }
+                    Expr::Get { object, name } => {
+                        return Ok(Expr::Set {
+                            object,
+                            name,
+                            value: Rc::new(value),
+                        });
+                    }
+                    Expr::GetComputed { object, prop } => {
+                        return Ok(Expr::SetComputed {
+                            object,
+                            prop,
+                            value: Rc::new(value),
+                        });
+                    }
                     _ => return Err(self.error("invalid assignment target")),
                 }
             }
@@ -775,7 +800,7 @@ mod parser {
                         )?;
                         expr = Expr::Get {
                             object: Rc::new(expr),
-                            prop: prop.clone(),
+                            name: prop.clone(),
                         };
                     } else {
                         let prop = self.expression()?;
@@ -976,7 +1001,7 @@ mod value {
             body: Vec<Stmt>,
             closure: EnvRef,
         },
-        List(Vec<Value>),
+        List(Rc<RefCell<Vec<Value>>>),
         Object(Rc<RefCell<Object>>),
     }
 
@@ -1043,7 +1068,7 @@ mod value {
                 ),
                 Value::List(values) => {
                     write!(f, "[")?;
-                    for (i, value) in values.iter().enumerate() {
+                    for (i, value) in values.borrow().iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
@@ -1169,7 +1194,7 @@ mod interpreter {
                 .define("PI".to_string(), Value::Number(std::f64::consts::PI));
 
             Interpreter {
-                env: globals,
+                env: Rc::clone(&globals),
                 config: Config { repl: false },
             }
         }
@@ -1268,27 +1293,13 @@ mod interpreter {
                     body: body.clone(),
                     closure: Rc::clone(&self.env),
                 }),
-                Expr::Get { object, prop } => match self.evaluate(object)? {
-                    Value::Object(obj) => {
-                        let prop = match prop {
-                            Token {
-                                kind: TokenKind::Identifier,
-                                value,
-                                ..
-                            } => value.clone(),
-                            _ => {
-                                return Err(
-                                    "invalid property access".to_string()
-                                );
-                            }
-                        };
-                        match obj.borrow().get(&prop) {
-                            Some(value) => Ok(value),
-                            None => {
-                                Err(format!("undefined property '{}'", prop))
-                            }
+                Expr::Get { object, name } => match self.evaluate(object)? {
+                    Value::Object(obj) => match obj.borrow().get(&name.value) {
+                        Some(value) => Ok(value),
+                        None => {
+                            Err(format!("undefined property '{}'", name.value))
                         }
-                    }
+                    },
                     _ => Err("invalid property access".to_string()),
                 },
                 Expr::GetComputed { object, prop } => {
@@ -1299,8 +1310,8 @@ mod interpreter {
                             match prop {
                                 Value::Number(n) => {
                                     let index = n as usize;
-                                    if index < values.len() {
-                                        Ok(values[index].clone())
+                                    if index < values.borrow().len() {
+                                        Ok(values.borrow()[index].clone())
                                     } else {
                                         Err("index out of bounds".to_string())
                                     }
@@ -1309,29 +1320,47 @@ mod interpreter {
                                     .to_string()),
                             }
                         }
+                        Value::Object(obj) => match prop {
+                            Value::String(key) => {
+                                match obj.borrow().get(&key) {
+                                    Some(value) => Ok(value),
+                                    None => Err(format!(
+                                        "undefined property '{}'",
+                                        key
+                                    )),
+                                }
+                            }
+                            _ => {
+                                Err("property key must be a string".to_string())
+                            }
+                        },
                         _ => Err("invalid property access".to_string()),
                     }
                 }
                 Expr::Literal(value) => Ok(value.into()),
-                Expr::List(values) => Ok(Value::List(
+                Expr::List(values) => Ok(Value::List(Rc::new(RefCell::new(
                     values
                         .iter()
                         .map(|expr| self.evaluate(expr))
                         .collect::<Result<Vec<_>, _>>()?,
-                )),
+                )))),
                 Expr::Object { props } => {
                     let mut properties = HashMap::new();
                     for (key, value) in props {
                         match value {
                             Some(value) => {
+                                // { key: value }
                                 properties.insert(
                                     key.value.clone(),
                                     self.evaluate(value)?,
                                 );
                             }
                             None => {
-                                properties
-                                    .insert(key.value.clone(), Value::Nil);
+                                // { key }
+                                properties.insert(
+                                    key.value.clone(),
+                                    self.env.borrow_mut().get(&key)?,
+                                );
                             }
                         }
                     }
@@ -1341,13 +1370,61 @@ mod interpreter {
                 Expr::Range(start, end) => {
                     let start = self.evaluate(start)?;
                     let end = self.evaluate(end)?;
-
                     self.eval_range(start, end)
                 }
-                Expr::Variable(name) => {
-                    // println!("--> name: {:?}", name);
-                    self.env.borrow_mut().get(name)
+                Expr::Set {
+                    object,
+                    name,
+                    value,
+                } => {
+                    let object = self.evaluate(object)?;
+                    let value = self.evaluate(value)?;
+                    match object {
+                        Value::Object(obj) => {
+                            obj.borrow_mut()
+                                .set(name.value.clone(), value.clone());
+                            Ok(value)
+                        }
+                        _ => Err("invalid property access".to_string()),
+                    }
                 }
+                Expr::SetComputed {
+                    object,
+                    prop,
+                    value,
+                } => {
+                    let object = self.evaluate(object)?;
+                    let prop = self.evaluate(prop)?;
+                    let value = self.evaluate(value)?;
+                    match object {
+                        Value::List(mut values) => match prop {
+                            Value::Number(n) => {
+                                let index = n as usize;
+                                if index < values.borrow().len() {
+                                    values.borrow_mut()[index] = value.clone();
+                                    Ok(value)
+                                } else {
+                                    Err("index out of bounds".to_string())
+                                }
+                            }
+                            _ => {
+                                Err("invalid index, expected number"
+                                    .to_string())
+                            }
+                        },
+                        Value::Object(obj) => match prop {
+                            Value::String(key) => {
+                                obj.borrow_mut().set(key, value.clone());
+                                Ok(value)
+                            }
+                            _ => {
+                                Err("property key must be a string".to_string())
+                            }
+                        },
+                        _ => Err("invalid property access".to_string()),
+                    }
+                }
+                Expr::Variable(name) => self.env.borrow_mut().get(name),
                 Expr::BinaryOp { op, lhs, rhs } => {
                     let lhs = self.evaluate(lhs)?;
                     let rhs = self.evaluate(rhs)?;
@@ -1357,7 +1434,6 @@ mod interpreter {
                     let rhs = self.evaluate(rhs)?;
                     self.eval_unary(op, rhs)
                 }
-
                 Expr::Noop => unreachable!(),
             }
         }
@@ -1392,10 +1468,10 @@ mod interpreter {
         ) -> Result<Value, String> {
             match iterable {
                 Value::List(values) => {
-                    for value in values {
+                    for value in values.borrow().iter() {
                         self.env
                             .borrow_mut()
-                            .define(variable.value.clone(), value);
+                            .define(variable.value.clone(), value.clone());
                         self.exec_block(body, Rc::clone(&self.env))?;
                     }
                     Ok(Value::Nil)
@@ -1432,7 +1508,7 @@ mod interpreter {
                         env.borrow_mut().define(param.value.clone(), arg);
                     }
 
-                    self.exec_block(&body, Rc::clone(&env))
+                    self.exec_block(&body, env)
                 }
 
                 _ => Err("can only call functions".to_string()),
@@ -1450,7 +1526,7 @@ mod interpreter {
                         .map(|n| Value::Number(n as f64))
                         .collect();
 
-                    Ok(Value::List(elements))
+                    Ok(Value::List(Rc::new(RefCell::new(elements))))
                 }
                 _ => Err("invalid range".to_string()),
             }
@@ -1672,6 +1748,11 @@ impl Es {
         match command {
             ".exit" => std::process::exit(0),
             ".env" => println!("{:#?}", self.interpreter.env.borrow()),
+            ".gc" => {
+                std::mem::drop(self.interpreter.env.clone());
+                println!("Garbage collected");
+            }
+            ".debug" => self.config.debug = !self.config.debug,
             _ => println!("Unknown command: {}", command),
         }
     }
@@ -1724,7 +1805,7 @@ lazy_static! {
                 //     let len = obj.props.borrow().len();
                 //     Ok(Value::Number(len as f64))
                 // }
-                Value::List(list) => Ok(Value::Number(list.len() as f64)),
+                Value::List(list) => Ok(Value::Number(list.borrow().len() as f64)),
                 _ => Err(format!("expected iterable, got {:?}", args[0])),
             }
         }),
