@@ -61,7 +61,7 @@ mod lexer {
         DotDot, Arrow,
 
         // Literals
-        Identifier, Number, String,
+        Identifier, Number, Str,
 
         // Keywords
         And, Break, Class, Elif, Else, False,
@@ -251,7 +251,7 @@ mod lexer {
             self.eat();
 
             let value = &self.source[self.start + 1..self.index - 1];
-            self.token_value(TokenKind::String, value.to_string());
+            self.token_value(TokenKind::Str, value.to_string());
             Ok(())
         }
 
@@ -348,25 +348,25 @@ mod parser {
             Parser { tokens, index: 0 }
         }
 
-        pub fn parse(&mut self) -> Vec<Stmt> {
+        pub fn parse(&mut self) -> (Vec<Stmt>, Vec<String>) {
             let mut program = Vec::new();
+            let mut errors = Vec::new();
+
             loop {
                 if self.eof() {
                     break;
                 }
 
                 match self.declaration() {
-                    Ok(stmt) => {
-                        println!("{:?}", stmt);
-                        program.push(stmt);
-                    }
+                    Ok(stmt) => program.push(stmt),
                     Err(msg) => {
-                        eprintln!("Parse error: {}", msg);
-                        break;
+                        errors.push(format!("Parse error: {}", msg));
+                        self.synchronyze();
                     }
                 }
             }
-            program
+
+            (program, errors)
         }
 
         fn declaration(&mut self) -> ParseResult<Stmt> {
@@ -524,7 +524,7 @@ mod parser {
                     let val = self.eat().value.parse::<f64>().unwrap();
                     Ok(Expr::Literal(Literal::Number(val)))
                 }
-                String => {
+                Str => {
                     let val = self.eat().value.clone();
                     Ok(Expr::Literal(Literal::String(val)))
                 }
@@ -586,6 +586,23 @@ mod parser {
         fn eof(&self) -> bool {
             self.at().kind == EOF
         }
+
+        fn synchronyze(&mut self) {
+            self.eat();
+
+            while !self.eof() {
+                if self.prev().kind == Semicolon {
+                    return;
+                }
+
+                match self.at().kind {
+                    Let | While => return,
+                    _ => {}
+                }
+
+                self.eat();
+            }
+        }
     }
 }
 
@@ -634,6 +651,7 @@ mod environment {
 
     pub type EnvRef = Rc<RefCell<Env>>;
 
+    #[derive(Debug)]
     pub struct Env {
         enclosing: Option<EnvRef>,
         values: RefCell<HashMap<String, Value>>,
@@ -684,7 +702,7 @@ mod interpreter {
     use super::value::Value;
 
     pub struct Interpreter {
-        env: EnvRef,
+        pub env: EnvRef,
     }
 
     impl Interpreter {
@@ -697,8 +715,8 @@ mod interpreter {
         pub fn interpret(&mut self, stmts: Vec<Stmt>) -> Result<(), String> {
             for stmt in stmts {
                 match self.execute(&stmt) {
-                    Ok(value) => println!("{}", value),
-                    Err(msg) => eprintln!("Runtime error: {}", msg),
+                    Ok(value) => println!("{:#?}", value),
+                    Err(msg) => return Err(format!("Runtime error: {}", msg)),
                 }
             }
             Ok(())
@@ -866,29 +884,84 @@ impl Es {
     }
 
     pub fn repl(&mut self) {
+        use std::io::{self, Write};
         loop {
-            use std::io::{self, Write};
             print!("> ");
             io::stdout().flush().unwrap();
             let mut buffer = String::new();
-            io::stdin().read_line(&mut buffer).unwrap();
-            self.run(buffer);
+            match io::stdin().read_line(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if buffer.starts_with('.') {
+                        self.command(&buffer);
+                        continue;
+                    }
+                    self.run(buffer.clone());
+                    self.had_error = false;
+                }
+                _ => break,
+            }
         }
     }
 
     pub fn file(&mut self, path: &str) {
         let source = std::fs::read_to_string(path).unwrap();
         self.run(source);
+
+        if self.had_error {
+            std::process::exit(65);
+        }
+
+        if self.had_runtime_error {
+            std::process::exit(70);
+        }
     }
 
     fn run(&mut self, source: String) {
         let mut lexer = Lexer::new(source);
-        let tokens = lexer.lex().unwrap();
-        println!("--> {:#?}", tokens);
-        let mut parser = Parser::new(tokens);
-        let stmts = parser.parse();
-        println!("{:#?}", stmts);
+        let tokens = lexer.lex().unwrap_or_else(|msg| {
+            self.error(msg);
+            Vec::new()
+        });
+        println!("--> Tokens {:#?}", tokens);
 
-        self.interpreter.interpret(stmts).unwrap();
+        if self.had_error {
+            return;
+        }
+
+        let mut parser = Parser::new(tokens);
+        let (program, errors) = parser.parse();
+        println!("--> Program {:#?}", program);
+
+        for error in errors {
+            self.error(error.to_string());
+        }
+
+        if self.had_error {
+            return;
+        }
+
+        self.interpreter.interpret(program).unwrap_or_else(|msg| {
+            self.runtime_error(msg);
+        });
+    }
+
+    pub fn error(&mut self, msg: String) {
+        eprintln!("{}", msg);
+        self.had_error = true;
+    }
+
+    pub fn runtime_error(&mut self, msg: String) {
+        eprintln!("{}", msg);
+        self.had_runtime_error = true;
+    }
+
+    fn command(&mut self, buffer: &str) {
+        let command = buffer.trim();
+        match command {
+            ".exit" => std::process::exit(0),
+            ".env" => println!("{:#?}", self.interpreter.env.borrow()),
+            _ => println!("Unknown command: {}", command),
+        }
     }
 }
