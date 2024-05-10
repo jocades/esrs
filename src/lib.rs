@@ -10,12 +10,18 @@ mod ast {
     pub enum Stmt {
         Expr(Expr),
         Block(Vec<Stmt>),
+        Break,
+        For {
+            variable: Token,
+            iterable: Rc<Expr>,
+            body: Vec<Stmt>,
+        },
         Function {
             name: Token,
             body: Rc<Expr>,
         },
         Let {
-            names: Vec<String>,
+            variables: Vec<String>,
             initializers: Vec<Option<Expr>>,
         },
         While {
@@ -45,18 +51,22 @@ mod ast {
         },
         Get {
             object: Rc<Expr>,
-            name: Token,
+            prop: Token,
         },
         GetComputed {
             object: Rc<Expr>,
-            property: Rc<Expr>,
+            prop: Rc<Expr>,
         },
         Literal(Literal),
+        List(Vec<Expr>),
+        Range(Rc<Expr>, Rc<Expr>),
         UnaryOp {
             op: Token,
             rhs: Rc<Expr>,
         },
         Variable(Token),
+
+        Noop,
     }
 
     #[derive(Debug, PartialEq, Clone)]
@@ -421,9 +431,9 @@ mod parser {
         }
 
         fn let_declaration(&mut self) -> ParseResult<Stmt> {
-            let mut names = Vec::new();
+            let mut variables = Vec::new();
             loop {
-                names.push(
+                variables.push(
                     self.expect(&Identifier, "expected identifier")?
                         .value
                         .clone(),
@@ -444,21 +454,21 @@ mod parser {
                     }
                 }
 
-                if names.len() != initializers.len() {
+                if variables.len() != initializers.len() {
                     return Err(self.error(&format!(
                         "expected {} initializers, got {}",
-                        names.len(),
+                        variables.len(),
                         initializers.len()
                     )));
                 }
             } else {
-                for _ in 0..names.len() {
+                for _ in 0..variables.len() {
                     initializers.push(None);
                 }
             }
 
             Ok(Stmt::Let {
-                names,
+                variables,
                 initializers,
             })
         }
@@ -466,7 +476,7 @@ mod parser {
         fn function_declaration(&mut self, kind: &str) -> ParseResult<Stmt> {
             let name = self.expect(
                 &Identifier,
-                &format!("expected {} after name.", kind),
+                &format!("expected {} after name", kind),
             )?;
 
             Ok(Stmt::Function {
@@ -476,7 +486,7 @@ mod parser {
         }
 
         fn function_body(&mut self, kind: &str) -> ParseResult<Expr> {
-            self.expect(&LParen, &format!("Expected '(' ater {} name.", kind))?;
+            self.expect(&LParen, &format!("expected '(' ater {} name", kind))?;
             let params = self.function_params()?;
             match self.eat().kind {
                 LBrace => Ok(Expr::Function {
@@ -487,7 +497,7 @@ mod parser {
                 //     params,
                 //     body: vec![self.expression()?],
                 // }),
-                _ => panic!("Expected '{{' or '->'  before {} body.", kind),
+                _ => panic!("expected '{{' or '->'  before {} body", kind),
             }
         }
 
@@ -505,7 +515,7 @@ mod parser {
                     }
                 }
             }
-            self.expect(&RParen, "Expected ')' afer parameters.")?;
+            self.expect(&RParen, "Expected ')' afer parameters")?;
 
             Ok(params)
         }
@@ -526,7 +536,8 @@ mod parser {
                     todo!()
                 }
                 For => {
-                    todo!()
+                    self.eat();
+                    self.for_statement()
                 }
                 If => {
                     todo!()
@@ -547,9 +558,41 @@ mod parser {
             }
         }
 
+        fn for_statement(&mut self) -> ParseResult<Stmt> {
+            // for x in 1..10 {}
+            let variable = self
+                .expect(&Identifier, "expected identifier after 'for'")?
+                .clone();
+            self.expect(&In, "expected 'in' after identifier")?;
+
+            let mut iterable = self.expression()?;
+
+            println!("for_statement: {:?}", iterable);
+            println!("for_statement: {:?}", self.at());
+
+            if self.check(&DotDot) {
+                println!("range");
+                if self.is_no(&iterable) {
+                    iterable = Expr::Literal(Literal::Number(0.0))
+                }
+                self.expect(&DotDot, "expected '..' after start expression")?;
+                let end = self.expression()?;
+                self.check_no(&end)?;
+                iterable = Expr::Range(Rc::new(iterable), Rc::new(end));
+            }
+
+            self.expect(&LBrace, "expected '{' after for loop expression")?;
+
+            Ok(Stmt::For {
+                variable,
+                iterable: Rc::new(iterable),
+                body: self.block()?,
+            })
+        }
+
         fn while_statement(&mut self) -> ParseResult<Stmt> {
             let condition = self.expression()?;
-            self.expect(&LBrace, "Expected '{' after while condition.")?;
+            self.expect(&LBrace, "Expected '{' after while condition")?;
             let body = self.block()?;
             Ok(Stmt::While {
                 condition: Rc::new(condition),
@@ -568,10 +611,12 @@ mod parser {
         }
 
         fn assignment(&mut self) -> ParseResult<Expr> {
-            let expr = self.equality()?;
+            let expr = self.list()?;
 
             if self.matches(&[Equal]) {
                 let value = self.assignment()?;
+                self.check_no(&value)?;
+
                 match expr {
                     Expr::Variable(name) => {
                         return Ok(Expr::Assign {
@@ -584,6 +629,25 @@ mod parser {
             }
 
             Ok(expr)
+        }
+
+        fn list(&mut self) -> ParseResult<Expr> {
+            if !self.matches(&[LBracket]) {
+                return self.equality();
+            }
+
+            let mut values = Vec::new();
+
+            while self.at().kind != RBracket {
+                values.push(self.expression()?);
+                if !self.matches(&[Comma]) {
+                    break;
+                }
+            }
+
+            self.expect(&RBracket, "Expected ']' after list declaration")?;
+
+            Ok(Expr::List(values))
         }
 
         fn equality(&mut self) -> ParseResult<Expr> {
@@ -670,25 +734,25 @@ mod parser {
                 if self.matches(&[LParen]) {
                     expr = self.finish_call(expr)?;
                 } else if self.matches(&[Dot, LBracket]) {
-                    let operator = self.prev();
-                    if operator.kind == Dot {
-                        let name = self.expect(
+                    let op = self.prev();
+                    if op.kind == Dot {
+                        let prop = self.expect(
                             &Identifier,
-                            "expected property name after '.'.",
+                            "expected property name after '.'",
                         )?;
                         expr = Expr::Get {
                             object: Rc::new(expr),
-                            name: name.clone(),
+                            prop: prop.clone(),
                         };
                     } else {
-                        let property = self.expression()?;
+                        let prop = self.expression()?;
                         self.expect(
                             &RBracket,
-                            "expected ']' after computed property.",
+                            "expected ']' after computed property",
                         )?;
                         expr = Expr::GetComputed {
                             object: Rc::new(expr),
-                            property: Rc::new(property),
+                            prop: Rc::new(prop),
                         };
                     }
                 } else {
@@ -709,7 +773,7 @@ mod parser {
                     }
                 }
             }
-            self.expect(&RParen, "expected ')' after arguments.")?;
+            self.expect(&RParen, "expected ')' after arguments")?;
 
             Ok(Expr::Call {
                 callee: Rc::new(callee),
@@ -753,7 +817,8 @@ mod parser {
                     self.expect(&RParen, "expected ')' after expression")?;
                     Ok(expr)
                 }
-                _ => Err(self.error("expected expression")),
+                // _ => Err(self.error("expected expression")),
+                _ => Ok(Expr::Noop),
             }
         }
 
@@ -797,10 +862,9 @@ mod parser {
         fn match_next(&mut self, kind: &TokenKind) -> bool {
             if self.check_next(kind) {
                 self.eat();
-                true
-            } else {
-                false
+                return true;
             }
+            false
         }
 
         fn expect(
@@ -809,14 +873,24 @@ mod parser {
             message: &str,
         ) -> ParseResult<&Token> {
             if self.check(expected) {
-                Ok(self.eat())
-            } else {
-                Err(self.error(message))
+                return Ok(self.eat());
             }
+            Err(self.error(message))
+        }
+
+        fn is_no(&self, expr: &Expr) -> bool {
+            &Expr::Noop == expr
+        }
+
+        fn check_no(&self, expr: &Expr) -> Result<(), String> {
+            if self.is_no(expr) {
+                return Err(self.error("expected expression"));
+            }
+            Ok(())
         }
 
         fn error(&self, message: &str) -> String {
-            format!("Parse error: {} at {:?}", message, self.at())
+            format!("Parse error: {} at {:?}.", message, self.at())
         }
 
         fn eof(&self) -> bool {
@@ -867,6 +941,7 @@ mod value {
             body: Vec<Stmt>,
             closure: EnvRef,
         },
+        List(Vec<Value>),
     }
 
     impl From<&Literal> for Value {
@@ -887,12 +962,22 @@ mod value {
                 Value::String(s) => write!(f, "{}", s),
                 Value::Bool(b) => write!(f, "{}", b),
                 Value::Nil => write!(f, "nil"),
+                Value::Builtin { name, .. } => write!(f, "<builtin {}>", name),
                 Value::Function { name, .. } => write!(
                     f,
                     "<fn {}>",
                     name.as_ref().unwrap_or(&"anonymous".to_string())
                 ),
-                Value::Builtin { name, .. } => write!(f, "<builtin {}>", name),
+                Value::List(values) => {
+                    write!(f, "[")?;
+                    for (i, value) in values.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", value)?;
+                    }
+                    write!(f, "]")
+                }
             }
         }
     }
@@ -911,23 +996,23 @@ mod environment {
     #[derive(Debug, PartialEq)]
     pub struct Env {
         enclosing: Option<EnvRef>,
-        values: HashMap<String, Value>,
+        values: RefCell<HashMap<String, Value>>,
     }
 
     impl Env {
         pub fn new(enclosing: Option<EnvRef>) -> EnvRef {
             Rc::new(RefCell::new(Env {
                 enclosing,
-                values: HashMap::new(),
+                values: RefCell::new(HashMap::new()),
             }))
         }
 
         pub fn define(&mut self, name: String, value: Value) {
-            self.values.insert(name, value);
+            self.values.borrow_mut().insert(name, value);
         }
 
         pub fn get(&mut self, name: &Token) -> Result<Value, String> {
-            match self.values.get(&name.value) {
+            match self.values.borrow().get(&name.value) {
                 Some(value) => Ok(value.clone()),
                 None => match &self.enclosing {
                     Some(parent) => parent.borrow_mut().get(name),
@@ -944,8 +1029,8 @@ mod environment {
             name: &Token,
             value: Value,
         ) -> Result<(), String> {
-            if self.values.contains_key(&name.value) {
-                self.values.insert(name.value.clone(), value);
+            if self.values.borrow().contains_key(&name.value) {
+                self.values.borrow_mut().insert(name.value.clone(), value);
                 Ok(())
             } else {
                 match &self.enclosing {
@@ -986,6 +1071,10 @@ mod interpreter {
                     },
                 );
             }
+            globals
+                .borrow_mut()
+                .define("PI".to_string(), Value::Number(std::f64::consts::PI));
+
             Interpreter { env: globals }
         }
 
@@ -1004,42 +1093,44 @@ mod interpreter {
                 Stmt::Expr(expr) => self.evaluate(expr),
                 Stmt::Block(stmts) => {
                     let env = Env::new(Some(Rc::clone(&self.env)));
-                    let prev_env = std::mem::replace(&mut self.env, env);
-                    let mut result = Value::Nil;
-                    for stmt in stmts {
-                        result = self.execute(stmt)?;
-                    }
-                    self.env = prev_env;
-                    Ok(result)
+                    self.exec_block(stmts, env)
+                }
+                Stmt::Break => todo!(),
+                Stmt::For {
+                    variable,
+                    iterable,
+                    body,
+                } => {
+                    let iterable = self.evaluate(iterable)?;
+                    self.exec_for(variable, iterable, body)
                 }
                 Stmt::Function { name, body } => {
                     match body.as_ref() {
                         Expr::Function { params, body } => {
-                            let closure = Rc::clone(&self.env);
                             self.env.borrow_mut().define(
                                 name.value.clone(),
                                 Value::Function {
                                     name: Some(name.value.clone()),
                                     params: params.clone(),
                                     body: body.clone(),
-                                    closure,
+                                    closure: Rc::clone(&self.env),
                                 },
                             );
                         }
-                        _ => return Err("expected function body".to_string()),
+                        _ => unreachable!(),
                     }
                     Ok(Value::Nil)
                 }
                 Stmt::Let {
-                    names,
+                    variables,
                     initializers,
                 } => {
-                    for (name, initializer) in names.iter().zip(initializers) {
-                        let value = match initializer {
+                    for (var, init) in variables.iter().zip(initializers) {
+                        let value = match init {
                             Some(expr) => self.evaluate(expr)?,
                             None => Value::Nil,
                         };
-                        self.env.borrow_mut().define(name.clone(), value);
+                        self.env.borrow_mut().define(var.clone(), value);
                     }
                     Ok(Value::Nil)
                 }
@@ -1076,7 +1167,43 @@ mod interpreter {
                     body: body.clone(),
                     closure: Rc::clone(&self.env),
                 }),
+                Expr::Get { object, prop } => match self.evaluate(object)? {
+                    _ => Err("invalid property access".to_string()),
+                },
+                Expr::GetComputed { object, prop } => {
+                    let object = self.evaluate(object)?;
+                    let prop = self.evaluate(prop)?;
+                    match object {
+                        Value::List(values) => {
+                            match prop {
+                                Value::Number(n) => {
+                                    let index = n as usize;
+                                    if index < values.len() {
+                                        Ok(values[index].clone())
+                                    } else {
+                                        Err("index out of bounds".to_string())
+                                    }
+                                }
+                                _ => Err("invalid index, expected number"
+                                    .to_string()),
+                            }
+                        }
+                        _ => Err("invalid property access".to_string()),
+                    }
+                }
                 Expr::Literal(value) => Ok(value.into()),
+                Expr::List(values) => Ok(Value::List(
+                    values
+                        .iter()
+                        .map(|expr| self.evaluate(expr))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                Expr::Range(start, end) => {
+                    let start = self.evaluate(start)?;
+                    let end = self.evaluate(end)?;
+
+                    self.eval_range(start, end)
+                }
                 Expr::Variable(name) => {
                     println!("--> name: {:?}", name);
                     self.env.borrow_mut().get(name)
@@ -1091,11 +1218,45 @@ mod interpreter {
                     self.eval_unary(op, rhs)
                 }
 
-                _ => Err("not implemented".to_string()),
+                Expr::Noop => unreachable!(),
             }
         }
 
         // -- STMT --
+
+        fn exec_block(
+            &mut self,
+            stmts: &Vec<Stmt>,
+            env: EnvRef,
+        ) -> Result<Value, String> {
+            let prev_env = std::mem::replace(&mut self.env, env);
+            let mut result = Value::Nil;
+            for stmt in stmts {
+                result = self.execute(&stmt)?;
+            }
+            self.env = prev_env;
+            Ok(result)
+        }
+
+        fn exec_for(
+            &mut self,
+            variable: &Token,
+            iterable: Value,
+            body: &Vec<Stmt>,
+        ) -> Result<Value, String> {
+            match iterable {
+                Value::List(values) => {
+                    for value in values {
+                        self.env
+                            .borrow_mut()
+                            .define(variable.value.clone(), value);
+                        self.exec_block(body, Rc::clone(&self.env))?;
+                    }
+                    Ok(Value::Nil)
+                }
+                _ => Err("expected list".to_string()),
+            }
+        }
 
         // -- EXPR --
 
@@ -1125,18 +1286,27 @@ mod interpreter {
                         env.borrow_mut().define(param.value.clone(), arg);
                     }
 
-                    let prev_env =
-                        std::mem::replace(&mut self.env, Rc::clone(&env));
-                    let mut result = Value::Nil;
-                    for stmt in body {
-                        result = self.execute(&stmt)?;
-                    }
-                    self.env = prev_env;
-
-                    Ok(result)
+                    self.exec_block(&body, Rc::clone(&env))
                 }
 
                 _ => Err("can only call functions".to_string()),
+            }
+        }
+
+        fn eval_range(
+            &self,
+            start: Value,
+            end: Value,
+        ) -> Result<Value, String> {
+            match (start, end) {
+                (Value::Number(start), Value::Number(end)) => {
+                    let elements = (start as i64..end as i64)
+                        .map(|n| Value::Number(n as f64))
+                        .collect();
+
+                    Ok(Value::List(elements))
+                }
+                _ => Err("invalid range".to_string()),
             }
         }
 
@@ -1264,6 +1434,19 @@ impl Es {
         }
     }
 
+    pub fn file(&mut self, path: &str) {
+        let source = std::fs::read_to_string(path).unwrap();
+        self.run(source);
+
+        if self.had_error {
+            std::process::exit(65);
+        }
+
+        if self.had_runtime_error {
+            std::process::exit(70);
+        }
+    }
+
     pub fn repl(&mut self) {
         use std::io::{self, Write};
         loop {
@@ -1285,24 +1468,11 @@ impl Es {
         }
     }
 
-    pub fn file(&mut self, path: &str) {
-        let source = std::fs::read_to_string(path).unwrap();
-        self.run(source);
-
-        if self.had_error {
-            std::process::exit(65);
-        }
-
-        if self.had_runtime_error {
-            std::process::exit(70);
-        }
-    }
-
     fn run(&mut self, source: String) {
         let mut lexer = Lexer::new(source);
         let tokens = lexer.lex().unwrap_or_else(|msg| {
             self.error(msg);
-            Vec::new()
+            vec![]
         });
         println!("--> Tokens {:#?}", tokens);
 
@@ -1315,7 +1485,7 @@ impl Es {
         println!("--> Program {:#?}", program);
 
         for error in errors {
-            self.error(error.to_string());
+            self.error(error);
         }
 
         if self.had_error {
@@ -1380,7 +1550,7 @@ lazy_static! {
                     Ok(Value::String("function".to_string()))
                 }
                 // Value::Object{..} => Ok(Value::String("object".to_string())),
-                // Value::List(_) => Ok(Value::String("list".to_string())),
+                Value::List(_) => Ok(Value::String("list".to_string())),
             }
         }),
         ("len", |args| {
