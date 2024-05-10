@@ -55,15 +55,15 @@ main()
 // List
 let list = ["a", "b", "c"]
 echo(list)
-//echo(list[0])
-//echo(list[1])
-//
-//
-//// For
-//for i in list {
-//  echo("for", i)
-//}
-//
-//for i in 0..3 {
-//  echo("for", i)
-//}
+echo(list[0])
+echo(list[1])
+
+
+// For
+for i in list {
+  echo("for", i)
+}
+
+for i in 0..3 {
+  echo("for", i)
+}
