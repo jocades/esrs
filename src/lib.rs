@@ -19,15 +19,23 @@ mod ast {
             name: Token,
             body: Rc<Expr>,
         },
+        If {
+            branches: Vec<(Expr, Vec<Stmt>)>,
+            else_branch: Option<Vec<Stmt>>,
+        },
+        Import {
+            path: String,
+        },
         Let {
             variables: Vec<String>,
             initializers: Vec<Option<Expr>>,
         },
+        Loop(Vec<Stmt>),
         While {
             condition: Rc<Expr>,
             body: Vec<Stmt>,
         },
-        Break,
+        Break(Token),
         Return(Token, Option<Expr>),
     }
 
@@ -60,6 +68,11 @@ mod ast {
         },
         Literal(Literal),
         List(Vec<Expr>),
+        Logical {
+            op: Token,
+            lhs: Rc<Expr>,
+            rhs: Rc<Expr>,
+        },
         Object {
             props: Vec<(Token, Option<Expr>)>,
         },
@@ -116,7 +129,7 @@ mod lexer {
 
         // Keywords
         And, Break, Class, Elif, Else, False,
-        Fn, For, If, In, Let, Nil, Or, Return,
+        Fn, For, If, Import, In, Let, Loop, Nil, Or, Return,
         Super, This, True, While,
 
         EOF,
@@ -136,6 +149,7 @@ mod lexer {
             m.insert("fn", Fn);
             m.insert("for", For);
             m.insert("if", If);
+            m.insert("import", Import);
             m.insert("in", In);
             m.insert("let", Let);
             m.insert("nil", Nil);
@@ -546,15 +560,24 @@ mod parser {
                     self.for_statement()
                 }
                 If => {
-                    todo!()
+                    self.eat();
+                    self.if_statement()
+                }
+                Import => {
+                    self.eat();
+                    self.import_statement()
+                }
+                Loop => {
+                    self.eat();
+                    self.loop_statement()
                 }
                 While => {
                     self.eat();
                     self.while_statement()
                 }
                 Break => {
-                    self.eat();
-                    Ok(Stmt::Break)
+                    let token = self.eat().clone();
+                    Ok(Stmt::Break(token))
                 }
                 Return => {
                     self.eat();
@@ -564,13 +587,11 @@ mod parser {
                     self.eat();
                     Ok(Stmt::Block(self.block()?))
                 }
-
                 _ => self.expression_statement(),
             }
         }
 
         fn for_statement(&mut self) -> ParseResult<Stmt> {
-            // for x in 1..10 {}
             let variable = self
                 .expect(&Identifier, "expected identifier after 'for'")?
                 .clone();
@@ -578,11 +599,7 @@ mod parser {
 
             let mut iterable = self.expression()?;
 
-            println!("for_statement: {:?}", iterable);
-            println!("for_statement: {:?}", self.at());
-
             if self.check(&DotDot) {
-                println!("range");
                 if self.is_noop(&iterable) {
                     iterable = Expr::Literal(Literal::Number(0.0))
                 }
@@ -601,10 +618,52 @@ mod parser {
             })
         }
 
-        fn while_statement(&mut self) -> ParseResult<Stmt> {
+        fn if_statement(&mut self) -> ParseResult<Stmt> {
+            let mut branches = vec![self.branch("if")?];
+
+            while self.matches(&[Elif]) {
+                branches.push(self.branch("elif")?);
+            }
+
+            let else_branch = if self.matches(&[Else]) {
+                Some(self.block()?)
+            } else {
+                None
+            };
+
+            Ok(Stmt::If {
+                branches,
+                else_branch,
+            })
+        }
+
+        fn branch(&mut self, kind: &str) -> Result<(Expr, Vec<Stmt>), String> {
             let condition = self.expression()?;
-            self.expect(&LBrace, "Expected '{' after while condition")?;
+            self.check_noop(&condition)?;
+            self.expect(
+                &LBrace,
+                &format!("expected '{{' after {kind} condition"),
+            )?;
             let body = self.block()?;
+            Ok((condition, body))
+        }
+
+        fn import_statement(&mut self) -> ParseResult<Stmt> {
+            let path = self
+                .expect(&Str, "expected string literal after 'import'")?
+                .value
+                .clone();
+
+            Ok(Stmt::Import { path })
+        }
+
+        fn loop_statement(&mut self) -> ParseResult<Stmt> {
+            self.expect(&LBrace, "expected '{' after 'loop'")?;
+            Ok(Stmt::Loop(self.block()?))
+        }
+
+        fn while_statement(&mut self) -> ParseResult<Stmt> {
+            let (condition, body) = self.branch("while")?;
             Ok(Stmt::While {
                 condition: Rc::new(condition),
                 body,
@@ -636,7 +695,7 @@ mod parser {
         }
 
         fn assignment(&mut self) -> ParseResult<Expr> {
-            let expr = self.object()?;
+            let expr = self.or()?;
 
             if self.matches(&[Equal]) {
                 let value = self.assignment()?;
@@ -670,59 +729,36 @@ mod parser {
             Ok(expr)
         }
 
-        fn object(&mut self) -> ParseResult<Expr> {
-            if !self.matches(&[LBrace]) {
-                return self.list();
+        fn or(&mut self) -> ParseResult<Expr> {
+            let mut expr = self.and()?;
+
+            while self.matches(&[Or]) {
+                let op = self.prev().clone();
+                let rhs = self.and()?;
+                expr = Expr::Logical {
+                    op,
+                    lhs: Rc::new(expr),
+                    rhs: Rc::new(rhs),
+                };
             }
 
-            let mut props = Vec::new();
-
-            while self.at().kind != RBrace {
-                let key = self
-                    .expect(&Identifier, "expected identifier key")?
-                    .clone();
-
-                if self.matches(&[Comma]) {
-                    props.push((key, None));
-                    continue;
-                } else if self.at().kind == RBrace {
-                    // allows shorthand key: pair -> { key }
-                    props.push((key, None));
-                    break;
-                }
-
-                self.expect(&Colon, "expected ':' after object key")?;
-
-                let value = self.expression()?;
-                props.push((key, Some(value)));
-
-                if self.at().kind != RBrace {
-                    self.expect(&Comma, "expected ',' after object value")?;
-                }
-            }
-
-            self.expect(&RBrace, "expected '}' after object declaration")?;
-
-            Ok(Expr::Object { props })
+            Ok(expr)
         }
 
-        fn list(&mut self) -> ParseResult<Expr> {
-            if !self.matches(&[LBracket]) {
-                return self.equality();
+        fn and(&mut self) -> ParseResult<Expr> {
+            let mut expr = self.equality()?;
+
+            while self.matches(&[And]) {
+                let op = self.prev().clone();
+                let rhs = self.equality()?;
+                expr = Expr::Logical {
+                    op,
+                    lhs: Rc::new(expr),
+                    rhs: Rc::new(rhs),
+                };
             }
 
-            let mut values = Vec::new();
-
-            while self.at().kind != RBracket {
-                values.push(self.expression()?);
-                if !self.matches(&[Comma]) {
-                    break;
-                }
-            }
-
-            self.expect(&RBracket, "Expected ']' after list declaration")?;
-
-            Ok(Expr::List(values))
+            Ok(expr)
         }
 
         fn equality(&mut self) -> ParseResult<Expr> {
@@ -730,11 +766,11 @@ mod parser {
 
             while self.matches(&[BangEqual, EqualEqual]) {
                 let op = self.prev().clone();
-                let right = self.comparison()?;
+                let rhs = self.comparison()?;
                 expr = Expr::BinaryOp {
                     op,
                     lhs: Rc::new(expr),
-                    rhs: Rc::new(right),
+                    rhs: Rc::new(rhs),
                 };
             }
 
@@ -774,7 +810,7 @@ mod parser {
         }
 
         fn factor(&mut self) -> ParseResult<Expr> {
-            let mut expr = self.unary()?;
+            let mut expr = self.object()?;
 
             while self.matches(&[Star, Slash]) {
                 let op = self.prev().clone();
@@ -787,6 +823,61 @@ mod parser {
             }
 
             Ok(expr)
+        }
+
+        fn object(&mut self) -> ParseResult<Expr> {
+            if !self.matches(&[LBrace]) {
+                return self.list();
+            }
+
+            let mut props = Vec::new();
+
+            while self.at().kind != RBrace {
+                let key = self
+                    .expect(&Identifier, "expected identifier key")?
+                    .clone();
+
+                if self.matches(&[Comma]) {
+                    props.push((key, None));
+                    continue;
+                } else if self.at().kind == RBrace {
+                    // allows shorthand { key }
+                    props.push((key, None));
+                    break;
+                }
+
+                self.expect(&Colon, "expected ':' after object key")?;
+
+                let value = self.expression()?;
+                props.push((key, Some(value)));
+
+                if self.at().kind != RBrace {
+                    self.expect(&Comma, "expected ',' after object value")?;
+                }
+            }
+
+            self.expect(&RBrace, "expected '}' after object declaration")?;
+
+            Ok(Expr::Object { props })
+        }
+
+        fn list(&mut self) -> ParseResult<Expr> {
+            if !self.matches(&[LBracket]) {
+                return self.unary();
+            }
+
+            let mut values = Vec::new();
+
+            while self.at().kind != RBracket {
+                values.push(self.expression()?);
+                if !self.matches(&[Comma]) {
+                    break;
+                }
+            }
+
+            self.expect(&RBracket, "Expected ']' after list declaration")?;
+
+            Ok(Expr::List(values))
         }
 
         fn unary(&mut self) -> ParseResult<Expr> {
@@ -1201,6 +1292,8 @@ mod interpreter {
         Return(Value, String),
     }
 
+    pub type RuntimeResult = Result<Value, Runtime>;
+
     impl Interpreter {
         pub fn new() -> Interpreter {
             let globals = Environment::new(None);
@@ -1240,14 +1333,15 @@ mod interpreter {
             Ok(())
         }
 
-        fn execute(&mut self, stmt: &Stmt) -> Result<Value, Runtime> {
+        fn execute(&mut self, stmt: &Stmt) -> RuntimeResult {
             match stmt {
                 Stmt::Expr(expr) => self.evaluate(expr),
+
                 Stmt::Block(stmts) => {
                     let env = Environment::new(Some(Rc::clone(&self.env)));
-                    self.exec_block(stmts, env)
+                    self.exec_block_with_closure(stmts, env)
                 }
-                Stmt::Break => Err(Runtime::Break(
+                Stmt::Break(_token) => Err(Runtime::Break(
                     "break statement used outside of loop".to_string(),
                 )),
                 Stmt::For {
@@ -1271,8 +1365,27 @@ mod interpreter {
                                 },
                             );
                         }
-                        _ => unreachable!(),
+                        _ => unreachable!("expected function body expression"),
                     }
+                    Ok(Value::Nil)
+                }
+                Stmt::If {
+                    branches,
+                    else_branch,
+                } => {
+                    for (condition, body) in branches {
+                        if is_truthy(&self.evaluate(condition)?) {
+                            return self.exec_block(body);
+                        }
+                    }
+                    match else_branch {
+                        Some(body) => self.exec_block(body),
+                        None => Ok(Value::Nil),
+                    }
+                }
+                Stmt::Import { path } => {
+                    let module = self.load_module(path)?;
+                    self.env.borrow_mut().define(path.clone(), module);
                     Ok(Value::Nil)
                 }
                 Stmt::Let {
@@ -1288,16 +1401,22 @@ mod interpreter {
                     }
                     Ok(Value::Nil)
                 }
+                Stmt::Loop(body) => loop {
+                    for stmt in body {
+                        match self.execute(stmt) {
+                            Ok(_) => {}
+                            Err(Runtime::Break(_)) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                },
                 Stmt::Return(_, value) => {
                     let value = match value {
                         Some(expr) => self.evaluate(expr)?,
                         None => Value::Nil,
                     };
                     Err(Runtime::Return(
-                        match value {
-                            Value::Nil => Value::Nil,
-                            _ => value,
-                        },
+                        value,
                         "return statement used outside of function".to_string(),
                     ))
                 }
@@ -1316,7 +1435,7 @@ mod interpreter {
             }
         }
 
-        fn evaluate(&mut self, expr: &Expr) -> Result<Value, Runtime> {
+        fn evaluate(&mut self, expr: &Expr) -> RuntimeResult {
             match expr {
                 Expr::Assign { name, value } => {
                     let value = self.evaluate(value)?;
@@ -1395,6 +1514,23 @@ mod interpreter {
                         .map(|expr| self.evaluate(expr))
                         .collect::<Result<Vec<_>, _>>()?,
                 )))),
+                Expr::Logical { op, lhs, rhs } => {
+                    let lhs = self.evaluate(lhs)?;
+                    match op.kind {
+                        TokenKind::Or => {
+                            if is_truthy(&lhs) {
+                                return Ok(lhs);
+                            }
+                        }
+                        TokenKind::And => {
+                            if !is_truthy(&lhs) {
+                                return Ok(lhs);
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                    self.evaluate(rhs)
+                }
                 Expr::Object { props } => {
                     let mut properties = HashMap::new();
                     for (key, value) in props {
@@ -1490,17 +1626,27 @@ mod interpreter {
                     let rhs = self.evaluate(rhs)?;
                     self.eval_unary(op, rhs)
                 }
-                Expr::Noop => unreachable!(),
+                Expr::Noop => panic!("noop expression"),
             }
         }
 
         // -- STMT --
+        fn exec_block(&mut self, stmts: &Vec<Stmt>) -> RuntimeResult {
+            let mut result = Value::Nil;
+            for stmt in stmts {
+                match self.execute(stmt) {
+                    Ok(value) => result = value,
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(result)
+        }
 
-        fn exec_block(
+        fn exec_block_with_closure(
             &mut self,
             stmts: &Vec<Stmt>,
             env: EnvRef,
-        ) -> Result<Value, Runtime> {
+        ) -> RuntimeResult {
             let prev_env = std::mem::replace(&mut self.env, env);
             let mut result = Value::Nil;
             for stmt in stmts {
@@ -1521,18 +1667,99 @@ mod interpreter {
             variable: &Token,
             iterable: Value,
             body: &Vec<Stmt>,
-        ) -> Result<Value, Runtime> {
+        ) -> RuntimeResult {
             match iterable {
                 Value::List(values) => {
                     for value in values.borrow().iter() {
                         self.env
                             .borrow_mut()
                             .define(variable.value.clone(), value.clone());
-                        self.exec_block(body, Rc::clone(&self.env))?;
+                        self.exec_block(body)?;
                     }
-                    Ok(Value::Nil)
                 }
-                _ => Err(Runtime::Error("expected list".to_string())),
+                Value::String(s) => {
+                    for c in s.chars() {
+                        self.env.borrow_mut().define(
+                            variable.value.clone(),
+                            Value::String(c.to_string()),
+                        );
+                        self.exec_block(body)?;
+                    }
+                }
+                Value::Object(obj) => {
+                    for (key, _) in obj.borrow().props.borrow().iter() {
+                        self.env.borrow_mut().define(
+                            variable.value.clone(),
+                            Value::String(key.clone()),
+                        );
+                        self.exec_block(body)?;
+                    }
+                }
+                _ => {
+                    return Err(Runtime::Error("expected iterable".to_string()))
+                }
+            };
+            Ok(Value::Nil)
+        }
+
+        fn load_module(&mut self, path: &str) -> RuntimeResult {
+            match path {
+                "math" => {
+                    let mut math_module: HashMap<
+                        &str,
+                        fn(Vec<Value>) -> Result<Value, String>,
+                    > = HashMap::new();
+
+                    math_module.insert("sum", |args: Vec<Value>| {
+                        let sum =
+                            args.iter().try_fold(
+                                0.0,
+                                |acc, value| match value {
+                                    Value::Number(n) => Ok(acc + n),
+                                    _ => {
+                                        Err("expected number in sum"
+                                            .to_string())
+                                    }
+                                },
+                            )?;
+                        Ok(Value::Number(sum))
+                    });
+                    math_module.insert("pow", |args: Vec<Value>| {
+                        match args.as_slice() {
+                            [Value::Number(base), Value::Number(exp)] => {
+                                Ok(Value::Number(base.powf(*exp)))
+                            }
+                            _ => Err("expected number".to_string()),
+                        }
+                    });
+                    math_module.insert("sqrt", |args: Vec<Value>| {
+                        match args.as_slice() {
+                            [Value::Number(n)] => Ok(Value::Number(n.sqrt())),
+                            _ => Err("expected number".to_string()),
+                        }
+                    });
+                    math_module.insert("abs", |args: Vec<Value>| {
+                        match args.as_slice() {
+                            [Value::Number(n)] => Ok(Value::Number(n.abs())),
+                            _ => Err("expected number".to_string()),
+                        }
+                    });
+
+                    let module = Object::new(None, HashMap::new(), None);
+                    for (name, func) in math_module.iter() {
+                        module.set(
+                            name.to_string(),
+                            Value::Builtin {
+                                name: name.to_string(),
+                                func: *func,
+                            },
+                        );
+                    }
+                    Ok(Value::Object(Rc::new(RefCell::new(module))))
+                }
+                _ => {
+                    Err(Runtime::Error(format!("module '{}' not found", path)))
+                }
             }
         }
 
@@ -1542,7 +1769,7 @@ mod interpreter {
             &mut self,
             callee: Value,
             args: Vec<Value>,
-        ) -> Result<Value, Runtime> {
+        ) -> RuntimeResult {
             match callee {
                 Value::Builtin { func, .. } => {
                     func(args).map_err(Runtime::Error)
@@ -1562,26 +1789,22 @@ mod interpreter {
                     }
 
                     let env = Environment::new(Some(Rc::clone(&closure)));
+
                     for (param, arg) in params.iter().zip(args) {
                         env.borrow_mut().define(param.value.clone(), arg);
                     }
 
-                    match self.exec_block(&body, env) {
+                    match self.exec_block_with_closure(&body, env) {
                         Ok(value) => Ok(value),
                         Err(Runtime::Return(value, _)) => Ok(value),
                         Err(e) => Err(e),
                     }
                 }
-
                 _ => Err(Runtime::Error("can only call functions".to_string())),
             }
         }
 
-        fn eval_range(
-            &self,
-            start: Value,
-            end: Value,
-        ) -> Result<Value, Runtime> {
+        fn eval_range(&self, start: Value, end: Value) -> RuntimeResult {
             match (start, end) {
                 (Value::Number(start), Value::Number(end)) => {
                     let elements = (start as i64..end as i64)
@@ -1594,20 +1817,20 @@ mod interpreter {
             }
         }
 
-        fn eval_unary(&self, op: &Token, rhs: Value) -> Result<Value, Runtime> {
+        fn eval_unary(&self, op: &Token, rhs: Value) -> RuntimeResult {
             use TokenKind::*;
             match op.kind {
                 Bang => match rhs {
                     Value::Bool(b) => Ok(Value::Bool(!b)),
-                    _ => {
-                        Err(Runtime::Error("invalid operand for !".to_string()))
-                    }
+                    _ => Err(Runtime::Error(
+                        "invalid operand for '!'".to_string(),
+                    )),
                 },
                 Minus => match rhs {
                     Value::Number(n) => Ok(Value::Number(-n)),
-                    _ => {
-                        Err(Runtime::Error("invalid operand for -".to_string()))
-                    }
+                    _ => Err(Runtime::Error(
+                        "invalid operand for '-'".to_string(),
+                    )),
                 },
                 _ => Err(Runtime::Error(format!("unknown operator: {:?}", op))),
             }
@@ -1618,7 +1841,7 @@ mod interpreter {
             op: &Token,
             lhs: Value,
             rhs: Value,
-        ) -> Result<Value, Runtime> {
+        ) -> RuntimeResult {
             use TokenKind::*;
             match op.kind {
                 BangEqual => Ok(Value::Bool(!is_eq(&lhs, &rhs))),
@@ -1628,7 +1851,7 @@ mod interpreter {
                         Ok(Value::Bool(x > y))
                     }
                     _ => Err(Runtime::Error(
-                        "invalid operands for >".to_string(),
+                        "invalid operands for '>'".to_string(),
                     )),
                 },
                 GreaterEqual => match (lhs, rhs) {
@@ -1636,7 +1859,7 @@ mod interpreter {
                         Ok(Value::Bool(x >= y))
                     }
                     _ => Err(Runtime::Error(
-                        "invalid operands for >=".to_string(),
+                        "invalid operands for '>='".to_string(),
                     )),
                 },
                 Less => match (lhs, rhs) {
@@ -1644,7 +1867,7 @@ mod interpreter {
                         Ok(Value::Bool(x < y))
                     }
                     _ => Err(Runtime::Error(
-                        "invalid operands for <".to_string(),
+                        "invalid operands for '<'".to_string(),
                     )),
                 },
                 LessEqual => match (lhs, rhs) {
@@ -1652,7 +1875,7 @@ mod interpreter {
                         Ok(Value::Bool(x <= y))
                     }
                     _ => Err(Runtime::Error(
-                        "invalid operands for <=".to_string(),
+                        "invalid operands for '<='".to_string(),
                     )),
                 },
                 Plus => match (lhs, rhs) {
@@ -1663,7 +1886,7 @@ mod interpreter {
                         Ok(Value::String(format!("{}{}", x, y)))
                     }
                     _ => Err(Runtime::Error(
-                        "invalid operands for +".to_string(),
+                        "invalid operands for '+'".to_string(),
                     )),
                 },
                 Minus => match (lhs, rhs) {
@@ -1671,7 +1894,7 @@ mod interpreter {
                         Ok(Value::Number(x - y))
                     }
                     _ => Err(Runtime::Error(
-                        "invalid operands for -".to_string(),
+                        "invalid operands for '-'".to_string(),
                     )),
                 },
                 Star => match (lhs, rhs) {
@@ -1679,7 +1902,7 @@ mod interpreter {
                         Ok(Value::Number(x * y))
                     }
                     _ => Err(Runtime::Error(
-                        "invalid operands for *".to_string(),
+                        "invalid operands for '*'".to_string(),
                     )),
                 },
                 Slash => match (lhs, rhs) {
@@ -1687,7 +1910,7 @@ mod interpreter {
                         Ok(Value::Number(x / y))
                     }
                     _ => Err(Runtime::Error(
-                        "invalid operands for /".to_string(),
+                        "invalid operands for '/'".to_string(),
                     )),
                 },
 
@@ -1781,8 +2004,7 @@ impl Es {
     }
 
     fn run(&mut self, source: &str) {
-        let mut lexer = Lexer::new(source);
-        let tokens = lexer.lex().unwrap_or_else(|msg| {
+        let tokens = Lexer::new(source).lex().unwrap_or_else(|msg| {
             self.error(msg);
             vec![]
         });
@@ -1861,7 +2083,7 @@ lazy_static! {
         }),
         ("type", |args| {
             if args.len() != 1 {
-                panic!("Expected 1 argument, got {}", args.len());
+                return Err(format!("expected 1 argument, got {}", args.len()));
             }
             // EneObject::String(format!("{:?}", args[0])) -> enum
             match args[0] {
