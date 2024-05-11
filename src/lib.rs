@@ -10,7 +10,6 @@ mod ast {
     pub enum Stmt {
         Expr(Expr),
         Block(Vec<Stmt>),
-        Break,
         For {
             variable: Token,
             iterable: Rc<Expr>,
@@ -28,6 +27,8 @@ mod ast {
             condition: Rc<Expr>,
             body: Vec<Stmt>,
         },
+        Break,
+        Return(Token, Option<Expr>),
     }
 
     #[derive(Debug, PartialEq, Clone)]
@@ -540,9 +541,6 @@ mod parser {
 
         fn statement(&mut self) -> ParseResult<Stmt> {
             match self.at().kind {
-                Break => {
-                    todo!()
-                }
                 For => {
                     self.eat();
                     self.for_statement()
@@ -550,12 +548,17 @@ mod parser {
                 If => {
                     todo!()
                 }
-                Return => {
-                    todo!()
-                }
                 While => {
                     self.eat();
                     self.while_statement()
+                }
+                Break => {
+                    self.eat();
+                    Ok(Stmt::Break)
+                }
+                Return => {
+                    self.eat();
+                    self.return_statement()
                 }
                 LBrace => {
                     self.eat();
@@ -606,6 +609,20 @@ mod parser {
                 condition: Rc::new(condition),
                 body,
             })
+        }
+
+        fn return_statement(&mut self) -> ParseResult<Stmt> {
+            let keyword = self.prev().clone();
+            let value = self.expression()?;
+
+            Ok(Stmt::Return(
+                keyword,
+                if self.is_noop(&value) {
+                    None
+                } else {
+                    Some(value)
+                },
+            ))
         }
 
         fn expression_statement(&mut self) -> ParseResult<Stmt> {
@@ -980,7 +997,7 @@ mod value {
     use std::fmt;
     use std::rc::Rc;
 
-    use super::ast::{Expr, Literal, Stmt};
+    use super::ast::{Literal, Stmt};
     use super::environment::EnvRef;
     use super::lexer::Token;
 
@@ -1098,6 +1115,7 @@ mod environment {
     use std::collections::HashMap;
     use std::rc::Rc;
 
+    use super::interpreter::Runtime;
     use super::lexer::Token;
     use super::value::Value;
 
@@ -1121,15 +1139,15 @@ mod environment {
             self.values.borrow_mut().insert(name, value);
         }
 
-        pub fn get(&mut self, name: &Token) -> Result<Value, String> {
+        pub fn get(&mut self, name: &Token) -> Result<Value, Runtime> {
             match self.values.borrow().get(&name.value) {
                 Some(value) => Ok(value.clone()),
                 None => match &self.enclosing {
                     Some(parent) => parent.borrow_mut().get(name),
-                    None => Err(format!(
+                    None => Err(Runtime::Error(format!(
                         "undefined variable '{}' at {:?}",
                         name.value, name
-                    )),
+                    ))),
                 },
             }
         }
@@ -1138,17 +1156,17 @@ mod environment {
             &mut self,
             name: &Token,
             value: Value,
-        ) -> Result<(), String> {
+        ) -> Result<(), Runtime> {
             if self.values.borrow().contains_key(&name.value) {
                 self.values.borrow_mut().insert(name.value.clone(), value);
                 Ok(())
             } else {
                 match &self.enclosing {
                     Some(parent) => parent.borrow_mut().assign(name, value),
-                    None => Err(format!(
+                    None => Err(Runtime::Error(format!(
                         "undefined variable '{}' at {:?}",
                         name.value, name
-                    )),
+                    ))),
                 }
             }
         }
@@ -1175,6 +1193,12 @@ mod interpreter {
 
     pub struct Config {
         pub repl: bool,
+    }
+
+    pub enum Runtime {
+        Error(String),
+        Break(String),
+        Return(Value, String),
     }
 
     impl Interpreter {
@@ -1204,7 +1228,9 @@ mod interpreter {
             for stmt in stmts {
                 match self.execute(stmt) {
                     Ok(value) => result = value,
-                    Err(msg) => return Err(format!("Runtime error: {}.", msg)),
+                    Err(Runtime::Error(msg)) => return Err(msg),
+                    Err(Runtime::Break(msg)) => return Err(msg),
+                    Err(Runtime::Return(_, msg)) => return Err(msg),
                 }
             }
             if self.config.repl {
@@ -1214,14 +1240,16 @@ mod interpreter {
             Ok(())
         }
 
-        fn execute(&mut self, stmt: &Stmt) -> Result<Value, String> {
+        fn execute(&mut self, stmt: &Stmt) -> Result<Value, Runtime> {
             match stmt {
                 Stmt::Expr(expr) => self.evaluate(expr),
                 Stmt::Block(stmts) => {
                     let env = Environment::new(Some(Rc::clone(&self.env)));
                     self.exec_block(stmts, env)
                 }
-                Stmt::Break => todo!(),
+                Stmt::Break => Err(Runtime::Break(
+                    "break statement used outside of loop".to_string(),
+                )),
                 Stmt::For {
                     variable,
                     iterable,
@@ -1260,10 +1288,27 @@ mod interpreter {
                     }
                     Ok(Value::Nil)
                 }
+                Stmt::Return(_, value) => {
+                    let value = match value {
+                        Some(expr) => self.evaluate(expr)?,
+                        None => Value::Nil,
+                    };
+                    Err(Runtime::Return(
+                        match value {
+                            Value::Nil => Value::Nil,
+                            _ => value,
+                        },
+                        "return statement used outside of function".to_string(),
+                    ))
+                }
                 Stmt::While { condition, body } => {
                     while is_truthy(&self.evaluate(condition)?) {
                         for stmt in body {
-                            self.execute(stmt)?;
+                            match self.execute(stmt) {
+                                Ok(_) => {}
+                                Err(Runtime::Break(_)) => break,
+                                Err(e) => return Err(e),
+                            }
                         }
                     }
                     Ok(Value::Nil)
@@ -1271,7 +1316,7 @@ mod interpreter {
             }
         }
 
-        fn evaluate(&mut self, expr: &Expr) -> Result<Value, String> {
+        fn evaluate(&mut self, expr: &Expr) -> Result<Value, Runtime> {
             match expr {
                 Expr::Assign { name, value } => {
                     let value = self.evaluate(value)?;
@@ -1296,45 +1341,51 @@ mod interpreter {
                 Expr::Get { object, name } => match self.evaluate(object)? {
                     Value::Object(obj) => match obj.borrow().get(&name.value) {
                         Some(value) => Ok(value),
-                        None => {
-                            Err(format!("undefined property '{}'", name.value))
-                        }
+                        None => Err(Runtime::Error(format!(
+                            "undefined property '{}'",
+                            name.value
+                        ))),
                     },
-                    _ => Err("invalid property access".to_string()),
+                    _ => Err(Runtime::Error(
+                        "invalid property access".to_string(),
+                    )),
                 },
                 Expr::GetComputed { object, prop } => {
                     let object = self.evaluate(object)?;
                     let prop = self.evaluate(prop)?;
                     match object {
-                        Value::List(values) => {
-                            match prop {
-                                Value::Number(n) => {
-                                    let index = n as usize;
-                                    if index < values.borrow().len() {
-                                        Ok(values.borrow()[index].clone())
-                                    } else {
-                                        Err("index out of bounds".to_string())
-                                    }
+                        Value::List(values) => match prop {
+                            Value::Number(n) => {
+                                let index = n as usize;
+                                if index < values.borrow().len() {
+                                    Ok(values.borrow()[index].clone())
+                                } else {
+                                    Err(Runtime::Error(
+                                        "index out of bounds".to_string(),
+                                    ))
                                 }
-                                _ => Err("invalid index, expected number"
-                                    .to_string()),
                             }
-                        }
+                            _ => Err(Runtime::Error(
+                                "invalid index, expected number".to_string(),
+                            )),
+                        },
                         Value::Object(obj) => match prop {
                             Value::String(key) => {
                                 match obj.borrow().get(&key) {
                                     Some(value) => Ok(value),
-                                    None => Err(format!(
+                                    None => Err(Runtime::Error(format!(
                                         "undefined property '{}'",
                                         key
-                                    )),
+                                    ))),
                                 }
                             }
-                            _ => {
-                                Err("property key must be a string".to_string())
-                            }
+                            _ => Err(Runtime::Error(
+                                "property key must be a string".to_string(),
+                            )),
                         },
-                        _ => Err("invalid property access".to_string()),
+                        _ => Err(Runtime::Error(
+                            "invalid property access".to_string(),
+                        )),
                     }
                 }
                 Expr::Literal(value) => Ok(value.into()),
@@ -1385,7 +1436,9 @@ mod interpreter {
                                 .set(name.value.clone(), value.clone());
                             Ok(value)
                         }
-                        _ => Err("invalid property access".to_string()),
+                        _ => Err(Runtime::Error(
+                            "invalid property access".to_string(),
+                        )),
                     }
                 }
                 Expr::SetComputed {
@@ -1397,31 +1450,34 @@ mod interpreter {
                     let prop = self.evaluate(prop)?;
                     let value = self.evaluate(value)?;
                     match object {
-                        Value::List(mut values) => match prop {
+                        Value::List(values) => match prop {
                             Value::Number(n) => {
                                 let index = n as usize;
                                 if index < values.borrow().len() {
                                     values.borrow_mut()[index] = value.clone();
                                     Ok(value)
                                 } else {
-                                    Err("index out of bounds".to_string())
+                                    Err(Runtime::Error(
+                                        "index out of bounds".to_string(),
+                                    ))
                                 }
                             }
-                            _ => {
-                                Err("invalid index, expected number"
-                                    .to_string())
-                            }
+                            _ => Err(Runtime::Error(
+                                "invalid index, expected number".to_string(),
+                            )),
                         },
                         Value::Object(obj) => match prop {
                             Value::String(key) => {
                                 obj.borrow_mut().set(key, value.clone());
                                 Ok(value)
                             }
-                            _ => {
-                                Err("property key must be a string".to_string())
-                            }
+                            _ => Err(Runtime::Error(
+                                "property key must be a string".to_string(),
+                            )),
                         },
-                        _ => Err("invalid property access".to_string()),
+                        _ => Err(Runtime::Error(
+                            "invalid property access".to_string(),
+                        )),
                     }
                 }
                 Expr::Variable(name) => self.env.borrow_mut().get(name),
@@ -1444,15 +1500,15 @@ mod interpreter {
             &mut self,
             stmts: &Vec<Stmt>,
             env: EnvRef,
-        ) -> Result<Value, String> {
+        ) -> Result<Value, Runtime> {
             let prev_env = std::mem::replace(&mut self.env, env);
             let mut result = Value::Nil;
             for stmt in stmts {
                 match self.execute(stmt) {
                     Ok(value) => result = value,
-                    Err(msg) => {
+                    Err(e) => {
                         self.env = prev_env;
-                        return Err(msg);
+                        return Err(e);
                     }
                 }
             }
@@ -1465,7 +1521,7 @@ mod interpreter {
             variable: &Token,
             iterable: Value,
             body: &Vec<Stmt>,
-        ) -> Result<Value, String> {
+        ) -> Result<Value, Runtime> {
             match iterable {
                 Value::List(values) => {
                     for value in values.borrow().iter() {
@@ -1476,7 +1532,7 @@ mod interpreter {
                     }
                     Ok(Value::Nil)
                 }
-                _ => Err("expected list".to_string()),
+                _ => Err(Runtime::Error("expected list".to_string())),
             }
         }
 
@@ -1486,9 +1542,11 @@ mod interpreter {
             &mut self,
             callee: Value,
             args: Vec<Value>,
-        ) -> Result<Value, String> {
+        ) -> Result<Value, Runtime> {
             match callee {
-                Value::Builtin { func, .. } => func(args),
+                Value::Builtin { func, .. } => {
+                    func(args).map_err(Runtime::Error)
+                }
                 Value::Function {
                     params,
                     body,
@@ -1496,11 +1554,11 @@ mod interpreter {
                     ..
                 } => {
                     if params.len() != args.len() {
-                        return Err(format!(
+                        return Err(Runtime::Error(format!(
                             "expected {} arguments, got {}",
                             params.len(),
                             args.len()
-                        ));
+                        )));
                     }
 
                     let env = Environment::new(Some(Rc::clone(&closure)));
@@ -1508,10 +1566,14 @@ mod interpreter {
                         env.borrow_mut().define(param.value.clone(), arg);
                     }
 
-                    self.exec_block(&body, env)
+                    match self.exec_block(&body, env) {
+                        Ok(value) => Ok(value),
+                        Err(Runtime::Return(value, _)) => Ok(value),
+                        Err(e) => Err(e),
+                    }
                 }
 
-                _ => Err("can only call functions".to_string()),
+                _ => Err(Runtime::Error("can only call functions".to_string())),
             }
         }
 
@@ -1519,7 +1581,7 @@ mod interpreter {
             &self,
             start: Value,
             end: Value,
-        ) -> Result<Value, String> {
+        ) -> Result<Value, Runtime> {
             match (start, end) {
                 (Value::Number(start), Value::Number(end)) => {
                     let elements = (start as i64..end as i64)
@@ -1528,22 +1590,26 @@ mod interpreter {
 
                     Ok(Value::List(Rc::new(RefCell::new(elements))))
                 }
-                _ => Err("invalid range".to_string()),
+                _ => Err(Runtime::Error("invalid range".to_string())),
             }
         }
 
-        fn eval_unary(&self, op: &Token, rhs: Value) -> Result<Value, String> {
+        fn eval_unary(&self, op: &Token, rhs: Value) -> Result<Value, Runtime> {
             use TokenKind::*;
             match op.kind {
                 Bang => match rhs {
                     Value::Bool(b) => Ok(Value::Bool(!b)),
-                    _ => Err("invalid operand for !".to_string()),
+                    _ => {
+                        Err(Runtime::Error("invalid operand for !".to_string()))
+                    }
                 },
                 Minus => match rhs {
                     Value::Number(n) => Ok(Value::Number(-n)),
-                    _ => Err("invalid operand for -".to_string()),
+                    _ => {
+                        Err(Runtime::Error("invalid operand for -".to_string()))
+                    }
                 },
-                _ => Err(format!("unknown operator: {:?}", op)),
+                _ => Err(Runtime::Error(format!("unknown operator: {:?}", op))),
             }
         }
 
@@ -1552,7 +1618,7 @@ mod interpreter {
             op: &Token,
             lhs: Value,
             rhs: Value,
-        ) -> Result<Value, String> {
+        ) -> Result<Value, Runtime> {
             use TokenKind::*;
             match op.kind {
                 BangEqual => Ok(Value::Bool(!is_eq(&lhs, &rhs))),
@@ -1561,25 +1627,33 @@ mod interpreter {
                     (Value::Number(x), Value::Number(y)) => {
                         Ok(Value::Bool(x > y))
                     }
-                    _ => Err("invalid operands for >".to_string()),
+                    _ => Err(Runtime::Error(
+                        "invalid operands for >".to_string(),
+                    )),
                 },
                 GreaterEqual => match (lhs, rhs) {
                     (Value::Number(x), Value::Number(y)) => {
                         Ok(Value::Bool(x >= y))
                     }
-                    _ => Err("invalid operands for >=".to_string()),
+                    _ => Err(Runtime::Error(
+                        "invalid operands for >=".to_string(),
+                    )),
                 },
                 Less => match (lhs, rhs) {
                     (Value::Number(x), Value::Number(y)) => {
                         Ok(Value::Bool(x < y))
                     }
-                    _ => Err("invalid operands for <".to_string()),
+                    _ => Err(Runtime::Error(
+                        "invalid operands for <".to_string(),
+                    )),
                 },
                 LessEqual => match (lhs, rhs) {
                     (Value::Number(x), Value::Number(y)) => {
                         Ok(Value::Bool(x <= y))
                     }
-                    _ => Err("invalid operands for <=".to_string()),
+                    _ => Err(Runtime::Error(
+                        "invalid operands for <=".to_string(),
+                    )),
                 },
                 Plus => match (lhs, rhs) {
                     (Value::Number(x), Value::Number(y)) => {
@@ -1588,28 +1662,36 @@ mod interpreter {
                     (Value::String(x), Value::String(y)) => {
                         Ok(Value::String(format!("{}{}", x, y)))
                     }
-                    _ => Err("invalid operands for +".to_string()),
+                    _ => Err(Runtime::Error(
+                        "invalid operands for +".to_string(),
+                    )),
                 },
                 Minus => match (lhs, rhs) {
                     (Value::Number(x), Value::Number(y)) => {
                         Ok(Value::Number(x - y))
                     }
-                    _ => Err("invalid operands for -".to_string()),
+                    _ => Err(Runtime::Error(
+                        "invalid operands for -".to_string(),
+                    )),
                 },
                 Star => match (lhs, rhs) {
                     (Value::Number(x), Value::Number(y)) => {
                         Ok(Value::Number(x * y))
                     }
-                    _ => Err("invalid operands for *".to_string()),
+                    _ => Err(Runtime::Error(
+                        "invalid operands for *".to_string(),
+                    )),
                 },
                 Slash => match (lhs, rhs) {
                     (Value::Number(x), Value::Number(y)) => {
                         Ok(Value::Number(x / y))
                     }
-                    _ => Err("invalid operands for /".to_string()),
+                    _ => Err(Runtime::Error(
+                        "invalid operands for /".to_string(),
+                    )),
                 },
 
-                _ => Err(format!("unknown operator: {:?}", op)),
+                _ => Err(Runtime::Error(format!("unknown operator: {:?}", op))),
             }
         }
     }
@@ -1739,7 +1821,7 @@ impl Es {
     }
 
     pub fn runtime_error(&mut self, msg: String) {
-        eprintln!("{}", msg);
+        eprintln!("Runtime error: {}", msg);
         self.had_runtime_error = true;
     }
 
