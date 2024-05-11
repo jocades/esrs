@@ -23,9 +23,6 @@ mod ast {
             branches: Vec<(Expr, Vec<Stmt>)>,
             else_branch: Option<Vec<Stmt>>,
         },
-        Import {
-            path: String,
-        },
         Let {
             variables: Vec<String>,
             initializers: Vec<Option<Expr>>,
@@ -129,7 +126,7 @@ mod lexer {
 
         // Keywords
         And, Break, Class, Elif, Else, False,
-        Fn, For, If, Import, In, Let, Loop, Nil, Or, Return,
+        Fn, For, If, /*Import*/ In, Let, Loop, Nil, Or, Return,
         Super, This, True, While,
 
         EOF,
@@ -149,9 +146,10 @@ mod lexer {
             m.insert("fn", Fn);
             m.insert("for", For);
             m.insert("if", If);
-            m.insert("import", Import);
+            // m.insert("import", Import);
             m.insert("in", In);
             m.insert("let", Let);
+            m.insert("loop", Loop);
             m.insert("nil", Nil);
             m.insert("or", Or);
             m.insert("return", Return);
@@ -199,7 +197,7 @@ mod lexer {
             }
             self.add_token(TokenKind::EOF);
 
-            Ok(self.tokens.to_vec())
+            Ok(self.tokens.clone())
         }
 
         fn scan(&mut self) -> Result<(), String> {
@@ -358,9 +356,7 @@ mod lexer {
         }
 
         fn matches(&mut self, expected: char) -> bool {
-            if self.eof() {
-                return false;
-            } else if self.at() != expected {
+            if self.eof() || self.at() != expected {
                 return false;
             }
             self.eat();
@@ -563,10 +559,10 @@ mod parser {
                     self.eat();
                     self.if_statement()
                 }
-                Import => {
+                /* Import => {
                     self.eat();
                     self.import_statement()
-                }
+                } */
                 Loop => {
                     self.eat();
                     self.loop_statement()
@@ -626,6 +622,7 @@ mod parser {
             }
 
             let else_branch = if self.matches(&[Else]) {
+                self.expect(&LBrace, "expected '{' after 'else'")?;
                 Some(self.block()?)
             } else {
                 None
@@ -648,14 +645,14 @@ mod parser {
             Ok((condition, body))
         }
 
-        fn import_statement(&mut self) -> ParseResult<Stmt> {
+        /* fn import_statement(&mut self) -> ParseResult<Stmt> {
             let path = self
                 .expect(&Str, "expected string literal after 'import'")?
                 .value
                 .clone();
 
             Ok(Stmt::Import { path })
-        }
+        } */
 
         fn loop_statement(&mut self) -> ParseResult<Stmt> {
             self.expect(&LBrace, "expected '{' after 'loop'")?;
@@ -1072,7 +1069,7 @@ mod parser {
                 }
 
                 match self.at().kind {
-                    Let | Fn | Break | If | While | For | Return => return,
+                    Let | Fn | If | For | While | Return => return,
                     _ => {}
                 }
 
@@ -1082,11 +1079,14 @@ mod parser {
     }
 }
 
-mod value {
+pub mod value {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::fmt;
     use std::rc::Rc;
+
+    use crate::environment::Environment;
+    use crate::interpreter::{Interpreter, Runtime, RuntimeResult};
 
     use super::ast::{Literal, Stmt};
     use super::environment::EnvRef;
@@ -1101,16 +1101,46 @@ mod value {
 
         Builtin {
             name: String,
-            func: fn(Vec<Value>) -> Result<Value, String>,
+            call: fn(Vec<Value>) -> Result<Value, String>,
         },
-        Function {
-            name: Option<String>,
-            params: Vec<Token>,
-            body: Vec<Stmt>,
-            closure: EnvRef,
-        },
+        Function(Rc<RefCell<Function>>),
         List(Rc<RefCell<Vec<Value>>>),
         Object(Rc<RefCell<Object>>),
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct Function {
+        pub name: Option<String>,
+        pub params: Vec<Token>,
+        pub body: Vec<Stmt>,
+        pub closure: EnvRef,
+    }
+
+    impl Function {
+        pub fn call(
+            &self,
+            interpreter: &mut Interpreter,
+            args: Vec<Value>,
+        ) -> RuntimeResult {
+            if self.params.len() != args.len() {
+                return Err(Runtime::Error(format!(
+                    "expected {} arguments, got {}",
+                    self.params.len(),
+                    args.len()
+                )));
+            }
+
+            let env = Environment::new(Some(Rc::clone(&self.closure)));
+            for (param, arg) in self.params.iter().zip(args.iter()) {
+                env.borrow_mut().define(param.value.clone(), arg.clone());
+            }
+
+            match interpreter.exec_block_with_closure(&self.body, env) {
+                Ok(value) => Ok(value),
+                Err(Runtime::Return(value, _)) => Ok(value),
+                Err(e) => Err(e),
+            }
+        }
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -1169,11 +1199,13 @@ mod value {
                 Value::Bool(b) => write!(f, "{}", b),
                 Value::Nil => write!(f, "nil"),
                 Value::Builtin { name, .. } => write!(f, "<builtin {}>", name),
-                Value::Function { name, .. } => write!(
-                    f,
-                    "<fn {}>",
-                    name.as_ref().unwrap_or(&"anonymous".to_string())
-                ),
+                Value::Function(func) => {
+                    write!(
+                        f,
+                        "<function {}>",
+                        func.borrow().name.as_ref().unwrap()
+                    )
+                }
                 Value::List(values) => {
                     write!(f, "[")?;
                     for (i, value) in values.borrow().iter().enumerate() {
@@ -1215,7 +1247,7 @@ mod environment {
     #[derive(Debug, PartialEq)]
     pub struct Environment {
         enclosing: Option<EnvRef>,
-        values: RefCell<HashMap<String, Value>>,
+        pub values: RefCell<HashMap<String, Value>>,
     }
 
     impl Environment {
@@ -1269,7 +1301,9 @@ mod interpreter {
     use std::collections::HashMap;
     use std::rc::Rc;
 
-    use crate::value::Object;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    use crate::value::{Function, Object};
     use crate::BUILTINS;
 
     use super::ast::{Expr, Stmt};
@@ -1302,7 +1336,7 @@ mod interpreter {
                     name.to_string(),
                     Value::Builtin {
                         name: name.to_string(),
-                        func: *func,
+                        call: *func,
                     },
                 );
             }
@@ -1310,8 +1344,11 @@ mod interpreter {
                 .borrow_mut()
                 .define("PI".to_string(), Value::Number(std::f64::consts::PI));
 
+            // create locals to be able to import module scoped values
+            let locals = Environment::new(Some(Rc::clone(&globals)));
+
             Interpreter {
-                env: Rc::clone(&globals),
+                env: Rc::clone(&locals),
                 config: Config { repl: false },
             }
         }
@@ -1357,12 +1394,14 @@ mod interpreter {
                         Expr::Function { params, body } => {
                             self.env.borrow_mut().define(
                                 name.value.clone(),
-                                Value::Function {
-                                    name: Some(name.value.clone()),
-                                    params: params.clone(),
-                                    body: body.clone(),
-                                    closure: Rc::clone(&self.env),
-                                },
+                                Value::Function(Rc::new(RefCell::new(
+                                    Function {
+                                        name: Some(name.value.clone()),
+                                        params: params.clone(),
+                                        body: body.clone(),
+                                        closure: Rc::clone(&self.env),
+                                    },
+                                ))),
                             );
                         }
                         _ => unreachable!("expected function body expression"),
@@ -1383,11 +1422,11 @@ mod interpreter {
                         None => Ok(Value::Nil),
                     }
                 }
-                Stmt::Import { path } => {
+                /* Stmt::Import { path } => {
                     let module = self.load_module(path)?;
                     self.env.borrow_mut().define(path.clone(), module);
                     Ok(Value::Nil)
-                }
+                } */
                 Stmt::Let {
                     variables,
                     initializers,
@@ -1401,15 +1440,16 @@ mod interpreter {
                     }
                     Ok(Value::Nil)
                 }
-                Stmt::Loop(body) => loop {
-                    for stmt in body {
-                        match self.execute(stmt) {
+                Stmt::Loop(body) => {
+                    loop {
+                        match self.exec_block(body) {
                             Ok(_) => {}
                             Err(Runtime::Break(_)) => break,
                             Err(e) => return Err(e),
                         }
                     }
-                },
+                    Ok(Value::Nil)
+                }
                 Stmt::Return(_, value) => {
                     let value = match value {
                         Some(expr) => self.evaluate(expr)?,
@@ -1448,15 +1488,24 @@ mod interpreter {
                         .iter()
                         .map(|arg| self.evaluate(arg))
                         .collect::<Result<Vec<_>, _>>()?;
-
-                    self.eval_call(callee, args)
+                    match callee {
+                        Value::Builtin { call, .. } => {
+                            call(args).map_err(Runtime::Error)
+                        }
+                        Value::Function(func) => func.borrow().call(self, args),
+                        _ => Err(Runtime::Error(
+                            "can only call functions".to_string(),
+                        )),
+                    }
                 }
-                Expr::Function { params, body } => Ok(Value::Function {
-                    name: None,
-                    params: params.clone(),
-                    body: body.clone(),
-                    closure: Rc::clone(&self.env),
-                }),
+                Expr::Function { params, body } => {
+                    Ok(Value::Function(Rc::new(RefCell::new(Function {
+                        name: None,
+                        params: params.clone(),
+                        body: body.clone(),
+                        closure: Rc::clone(&self.env),
+                    }))))
+                }
                 Expr::Get { object, name } => match self.evaluate(object)? {
                     Value::Object(obj) => match obj.borrow().get(&name.value) {
                         Some(value) => Ok(value),
@@ -1527,7 +1576,7 @@ mod interpreter {
                                 return Ok(lhs);
                             }
                         }
-                        _ => unreachable!(),
+                        _ => unreachable!("invalid logical operator"),
                     }
                     self.evaluate(rhs)
                 }
@@ -1642,7 +1691,7 @@ mod interpreter {
             Ok(result)
         }
 
-        fn exec_block_with_closure(
+        pub fn exec_block_with_closure(
             &mut self,
             stmts: &Vec<Stmt>,
             env: EnvRef,
@@ -1711,6 +1760,28 @@ mod interpreter {
                     > = HashMap::new();
 
                     math_module.insert("sum", |args: Vec<Value>| {
+                        // sum([1,2,3]) -> 6
+                        if args.len() == 1 {
+                            match &args[0] {
+                                Value::List(values) => {
+                                    let sum = values.borrow().iter().try_fold(
+                                        0.0,
+                                        |acc, value| match value {
+                                            Value::Number(n) => Ok(acc + n),
+                                            _ => Err("expected number in sum"
+                                                .to_string()),
+                                        },
+                                    )?;
+                                    return Ok(Value::Number(sum));
+                                }
+                                _ => {
+                                    return Err(
+                                        "expected list in sum".to_string()
+                                    )
+                                }
+                            };
+                        }
+                        // sum(1, 2, 3) -> 6
                         let sum =
                             args.iter().try_fold(
                                 0.0,
@@ -1751,58 +1822,62 @@ mod interpreter {
                             name.to_string(),
                             Value::Builtin {
                                 name: name.to_string(),
-                                func: *func,
+                                call: *func,
                             },
                         );
                     }
                     Ok(Value::Object(Rc::new(RefCell::new(module))))
                 }
-                _ => {
-                    Err(Runtime::Error(format!("module '{}' not found", path)))
+                "io" => {
+                    // io.input() -> string
+                    let io_module = Object::new(None, HashMap::new(), None);
+                    io_module.set(
+                        "input".to_string(),
+                        Value::Builtin {
+                            name: "input".to_string(),
+                            call: |args: Vec<Value>| {
+                                for arg in args {
+                                    print!("{}", arg);
+                                }
+                                let mut input = String::new();
+                                std::io::stdin()
+                                    .read_line(&mut input)
+                                    .expect("failed to read line");
+                                Ok(Value::String(input.trim().to_string()))
+                            },
+                        },
+                    );
+                    Ok(Value::Object(Rc::new(RefCell::new(io_module))))
+                }
+                path => {
+                    // Err(Runtime::Error(format!("module '{}' not found", path)))
+                    let source = std::fs::read_to_string(path).unwrap();
+                    let tokens = Lexer::new(&source).lex().unwrap();
+                    let (stmts, errors) = Parser::new(tokens).parse();
+
+                    if !errors.is_empty() {
+                        return Err(Runtime::Error(errors.join("\n")));
+                    }
+
+                    let mut interpreter = Interpreter::new();
+                    interpreter.interpret(&stmts).unwrap();
+
+                    println!("MODULE ENV {:#?}", interpreter.env);
+
+                    let module = Object::new(None, HashMap::new(), None);
+
+                    for (name, value) in
+                        interpreter.env.borrow().values.borrow().iter()
+                    {
+                        module.set(name.clone(), value.clone());
+                    }
+
+                    Ok(Value::Object(Rc::new(RefCell::new(module))))
                 }
             }
         }
 
         // -- EXPR --
-
-        fn eval_call(
-            &mut self,
-            callee: Value,
-            args: Vec<Value>,
-        ) -> RuntimeResult {
-            match callee {
-                Value::Builtin { func, .. } => {
-                    func(args).map_err(Runtime::Error)
-                }
-                Value::Function {
-                    params,
-                    body,
-                    closure,
-                    ..
-                } => {
-                    if params.len() != args.len() {
-                        return Err(Runtime::Error(format!(
-                            "expected {} arguments, got {}",
-                            params.len(),
-                            args.len()
-                        )));
-                    }
-
-                    let env = Environment::new(Some(Rc::clone(&closure)));
-
-                    for (param, arg) in params.iter().zip(args) {
-                        env.borrow_mut().define(param.value.clone(), arg);
-                    }
-
-                    match self.exec_block_with_closure(&body, env) {
-                        Ok(value) => Ok(value),
-                        Err(Runtime::Return(value, _)) => Ok(value),
-                        Err(e) => Err(e),
-                    }
-                }
-                _ => Err(Runtime::Error("can only call functions".to_string())),
-            }
-        }
 
         fn eval_range(&self, start: Value, end: Value) -> RuntimeResult {
             match (start, end) {
@@ -1940,11 +2015,13 @@ mod interpreter {
     }
 }
 
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
 use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser;
 
-use crate::value::Value;
+use crate::value::{Object, Value};
 
 pub struct Es {
     had_error: bool,
@@ -2024,11 +2101,10 @@ impl Es {
             println!("--> Program {:#?}", program);
         }
 
-        for error in errors {
-            self.error(error);
-        }
-
-        if self.had_error {
+        if !errors.is_empty() {
+            for error in errors {
+                self.error(error);
+            }
             return;
         }
 
@@ -2113,5 +2189,75 @@ lazy_static! {
                 _ => Err(format!("expected iterable, got {:?}", args[0])),
             }
         }),
+        // sleep(seconds)
+        ("sleep", |args| {
+            if args.len() != 1 {
+                return Err(format!("expected 1 argument, got {}", args.len()));
+            }
+            match args[0] {
+                Value::Number(n) => {
+                    std::thread::sleep(std::time::Duration::from_secs_f64(n));
+                    Ok(Value::Nil)
+                }
+                _ => Err("expected number".to_string()),
+            }
+        }),
+        ("import", |args| {
+            if args.len() != 1 {
+                return Err(format!("expected 1 argument, got {}", args.len()));
+            }
+
+            match &args[0] {
+                Value::String(path) => {
+                    let source = std::fs::read_to_string(path).unwrap();
+                    let tokens = Lexer::new(&source).lex().unwrap();
+                    let (stmts, errors) = Parser::new(tokens).parse();
+
+                    if !errors.is_empty() {
+                        return Err(errors.join("\n"));
+                    }
+
+                    let mut interpreter = Interpreter::new();
+                    interpreter.interpret(&stmts).unwrap();
+
+                    let module = Object::new(None, HashMap::new(), None);
+                    for (name, value) in interpreter.env.borrow().values.borrow().iter() {
+                        module.set(name.clone(), value.clone());
+                    }
+
+                    Ok(Value::Object(Rc::new(RefCell::new(module))))
+                }
+                _ => Err("expected string".to_string()),
+            }
+        })
+
     ];
+}
+
+mod module {
+    use std::collections::HashMap;
+
+    use crate::{interpreter::Interpreter, lexer::Lexer};
+
+    use super::value::Value;
+
+    struct Module {
+        name: String,
+        values: Vec<Value>,
+    }
+
+    impl Module {
+        fn new(name: String) -> Self {
+            Module {
+                name,
+                values: vec![],
+            }
+        }
+
+        fn add_value(&mut self, value: Value) {
+            self.values.push(value);
+        }
+    }
+
+    // get all the values from a module by interpeting it
 }
