@@ -127,7 +127,7 @@ mod lexer {
         // Keywords
         And, Break, Class, Elif, Else, False,
         Fn, For, If, /*Import*/ In, Let, Loop, Nil, Or, Return,
-        Super, This, True, While,
+        Super, /*This*/ True, While,
 
         EOF,
     }
@@ -154,7 +154,7 @@ mod lexer {
             m.insert("or", Or);
             m.insert("return", Return);
             m.insert("super", Super);
-            m.insert("this", This);
+            // m.insert("this", This);
             m.insert("true", True);
             m.insert("while", While);
             m
@@ -1141,6 +1141,17 @@ pub mod value {
                 Err(e) => Err(e),
             }
         }
+
+        pub fn bind(&self, instance: Value) -> Value {
+            let env = Environment::new(Some(Rc::clone(&self.closure)));
+            env.borrow_mut().define("this".to_string(), instance);
+            Value::Function(Rc::new(RefCell::new(Function {
+                name: self.name.clone(),
+                params: self.params.clone(),
+                body: self.body.clone(),
+                closure: env,
+            })))
+        }
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -1163,13 +1174,18 @@ pub mod value {
             }
         }
 
-        pub fn get(&self, key: &str) -> Option<Value> {
+        pub fn get(&mut self, key: &str) -> Option<Value> {
             if let Some(value) = self.props.borrow().get(key) {
+                if let Value::Function(func) = value {
+                    return Some(func.borrow().bind(Value::Object(Rc::new(
+                        RefCell::new(self.clone()),
+                    ))));
+                }
                 return Some(value.clone());
             }
 
             if let Some(proto) = self.proto.as_ref() {
-                return proto.borrow().get(key);
+                return proto.borrow_mut().get(key);
             }
 
             None
@@ -1203,7 +1219,10 @@ pub mod value {
                     write!(
                         f,
                         "<function {}>",
-                        func.borrow().name.as_ref().unwrap()
+                        func.borrow()
+                            .name
+                            .as_ref()
+                            .unwrap_or(&"anonymous".to_string())
                     )
                 }
                 Value::List(values) => {
@@ -1324,6 +1343,7 @@ mod interpreter {
         Error(String),
         Break(String),
         Return(Value, String),
+        Import(Value),
     }
 
     pub type RuntimeResult = Result<Value, Runtime>;
@@ -1344,7 +1364,6 @@ mod interpreter {
                 .borrow_mut()
                 .define("PI".to_string(), Value::Number(std::f64::consts::PI));
 
-            // create locals to be able to import module scoped values
             let locals = Environment::new(Some(Rc::clone(&globals)));
 
             Interpreter {
@@ -1361,6 +1380,11 @@ mod interpreter {
                     Err(Runtime::Error(msg)) => return Err(msg),
                     Err(Runtime::Break(msg)) => return Err(msg),
                     Err(Runtime::Return(_, msg)) => return Err(msg),
+                    Err(Runtime::Import(value)) => {
+                        self.env
+                            .borrow_mut()
+                            .define("module".to_string(), value);
+                    }
                 }
             }
             if self.config.repl {
@@ -1507,13 +1531,15 @@ mod interpreter {
                     }))))
                 }
                 Expr::Get { object, name } => match self.evaluate(object)? {
-                    Value::Object(obj) => match obj.borrow().get(&name.value) {
-                        Some(value) => Ok(value),
-                        None => Err(Runtime::Error(format!(
-                            "undefined property '{}'",
-                            name.value
-                        ))),
-                    },
+                    Value::Object(obj) => {
+                        match obj.borrow_mut().get(&name.value) {
+                            Some(value) => Ok(value),
+                            None => Err(Runtime::Error(format!(
+                                "undefined property '{}'",
+                                name.value
+                            ))),
+                        }
+                    }
                     _ => Err(Runtime::Error(
                         "invalid property access".to_string(),
                     )),
@@ -1539,7 +1565,7 @@ mod interpreter {
                         },
                         Value::Object(obj) => match prop {
                             Value::String(key) => {
-                                match obj.borrow().get(&key) {
+                                match obj.borrow_mut().get(&key) {
                                     Some(value) => Ok(value),
                                     None => Err(Runtime::Error(format!(
                                         "undefined property '{}'",
@@ -1751,132 +1777,6 @@ mod interpreter {
             Ok(Value::Nil)
         }
 
-        fn load_module(&mut self, path: &str) -> RuntimeResult {
-            match path {
-                "math" => {
-                    let mut math_module: HashMap<
-                        &str,
-                        fn(Vec<Value>) -> Result<Value, String>,
-                    > = HashMap::new();
-
-                    math_module.insert("sum", |args: Vec<Value>| {
-                        // sum([1,2,3]) -> 6
-                        if args.len() == 1 {
-                            match &args[0] {
-                                Value::List(values) => {
-                                    let sum = values.borrow().iter().try_fold(
-                                        0.0,
-                                        |acc, value| match value {
-                                            Value::Number(n) => Ok(acc + n),
-                                            _ => Err("expected number in sum"
-                                                .to_string()),
-                                        },
-                                    )?;
-                                    return Ok(Value::Number(sum));
-                                }
-                                _ => {
-                                    return Err(
-                                        "expected list in sum".to_string()
-                                    )
-                                }
-                            };
-                        }
-                        // sum(1, 2, 3) -> 6
-                        let sum =
-                            args.iter().try_fold(
-                                0.0,
-                                |acc, value| match value {
-                                    Value::Number(n) => Ok(acc + n),
-                                    _ => {
-                                        Err("expected number in sum"
-                                            .to_string())
-                                    }
-                                },
-                            )?;
-                        Ok(Value::Number(sum))
-                    });
-                    math_module.insert("pow", |args: Vec<Value>| {
-                        match args.as_slice() {
-                            [Value::Number(base), Value::Number(exp)] => {
-                                Ok(Value::Number(base.powf(*exp)))
-                            }
-                            _ => Err("expected number".to_string()),
-                        }
-                    });
-                    math_module.insert("sqrt", |args: Vec<Value>| {
-                        match args.as_slice() {
-                            [Value::Number(n)] => Ok(Value::Number(n.sqrt())),
-                            _ => Err("expected number".to_string()),
-                        }
-                    });
-                    math_module.insert("abs", |args: Vec<Value>| {
-                        match args.as_slice() {
-                            [Value::Number(n)] => Ok(Value::Number(n.abs())),
-                            _ => Err("expected number".to_string()),
-                        }
-                    });
-
-                    let module = Object::new(None, HashMap::new(), None);
-                    for (name, func) in math_module.iter() {
-                        module.set(
-                            name.to_string(),
-                            Value::Builtin {
-                                name: name.to_string(),
-                                call: *func,
-                            },
-                        );
-                    }
-                    Ok(Value::Object(Rc::new(RefCell::new(module))))
-                }
-                "io" => {
-                    // io.input() -> string
-                    let io_module = Object::new(None, HashMap::new(), None);
-                    io_module.set(
-                        "input".to_string(),
-                        Value::Builtin {
-                            name: "input".to_string(),
-                            call: |args: Vec<Value>| {
-                                for arg in args {
-                                    print!("{}", arg);
-                                }
-                                let mut input = String::new();
-                                std::io::stdin()
-                                    .read_line(&mut input)
-                                    .expect("failed to read line");
-                                Ok(Value::String(input.trim().to_string()))
-                            },
-                        },
-                    );
-                    Ok(Value::Object(Rc::new(RefCell::new(io_module))))
-                }
-                path => {
-                    // Err(Runtime::Error(format!("module '{}' not found", path)))
-                    let source = std::fs::read_to_string(path).unwrap();
-                    let tokens = Lexer::new(&source).lex().unwrap();
-                    let (stmts, errors) = Parser::new(tokens).parse();
-
-                    if !errors.is_empty() {
-                        return Err(Runtime::Error(errors.join("\n")));
-                    }
-
-                    let mut interpreter = Interpreter::new();
-                    interpreter.interpret(&stmts).unwrap();
-
-                    println!("MODULE ENV {:#?}", interpreter.env);
-
-                    let module = Object::new(None, HashMap::new(), None);
-
-                    for (name, value) in
-                        interpreter.env.borrow().values.borrow().iter()
-                    {
-                        module.set(name.clone(), value.clone());
-                    }
-
-                    Ok(Value::Object(Rc::new(RefCell::new(module))))
-                }
-            }
-        }
-
         // -- EXPR --
 
         fn eval_range(&self, start: Value, end: Value) -> RuntimeResult {
@@ -2027,6 +1927,7 @@ pub struct Es {
     had_error: bool,
     had_runtime_error: bool,
     interpreter: Interpreter,
+    modules: HashMap<String, Value>,
     config: Config,
 }
 
@@ -2040,6 +1941,7 @@ impl Es {
             had_error: false,
             had_runtime_error: false,
             interpreter: Interpreter::new(),
+            modules: HashMap::new(),
             config: Config { debug: false },
         }
     }
@@ -2202,32 +2104,33 @@ lazy_static! {
                 _ => Err("expected number".to_string()),
             }
         }),
+        ("num", |args| {
+            if args.len() != 1 {
+                return Err(format!("expected 1 argument, got {}", args.len()));
+            }
+            match &args[0] {
+                Value::String(s) => match s.parse::<f64>() {
+                    Ok(n) => Ok(Value::Number(n)),
+                    Err(_) => Err(format!("invalid number '{}'", s)),
+                },
+                _ => Err("expected string".to_string()),
+            }
+        }),
+        ("str", |args| {
+            if args.len() != 1 {
+                return Err(format!("expected 1 argument, got {}", args.len()));
+            }
+            Ok(Value::String(format!("{}", args[0])))
+        }),
         ("import", |args| {
             if args.len() != 1 {
                 return Err(format!("expected 1 argument, got {}", args.len()));
             }
-
             match &args[0] {
-                Value::String(path) => {
-                    let source = std::fs::read_to_string(path).unwrap();
-                    let tokens = Lexer::new(&source).lex().unwrap();
-                    let (stmts, errors) = Parser::new(tokens).parse();
-
-                    if !errors.is_empty() {
-                        return Err(errors.join("\n"));
-                    }
-
-                    let mut interpreter = Interpreter::new();
-                    interpreter.interpret(&stmts).unwrap();
-
-                    let module = Object::new(None, HashMap::new(), None);
-                    for (name, value) in interpreter.env.borrow().values.borrow().iter() {
-                        module.set(name.clone(), value.clone());
-                    }
-
-                    Ok(Value::Object(Rc::new(RefCell::new(module))))
-                }
+                Value::String(path) => module::load(path),
                 _ => Err("expected string".to_string()),
+
+
             }
         })
 
@@ -2235,29 +2138,90 @@ lazy_static! {
 }
 
 mod module {
-    use std::collections::HashMap;
+    use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc};
 
-    use crate::{interpreter::Interpreter, lexer::Lexer};
+    use crate::{
+        interpreter::Interpreter,
+        lexer::Lexer,
+        parser::Parser,
+        value::{Object, Value},
+    };
 
-    use super::value::Value;
+    pub fn load(path: &str) -> Result<Value, String> {
+        let path = std::path::Path::new(path);
 
-    struct Module {
-        name: String,
-        values: Vec<Value>,
-    }
+        println!("loading module: {}", path.display());
 
-    impl Module {
-        fn new(name: String) -> Self {
-            Module {
-                name,
-                values: vec![],
+        // if initial path is std then ust std lib for io, for example.
+        // match std/io, std/math, etc..
+        if path.starts_with("std") {
+            println!("loading std module");
+            let key = path.file_stem().unwrap().to_str().unwrap();
+            println!("key: {}", key);
+            match key {
+                "io" => return Ok(load_io()),
+                _ => {
+                    return Err(format!(
+                        "module '{}' not found",
+                        path.display()
+                    ))
+                }
             }
         }
 
-        fn add_value(&mut self, value: Value) {
-            self.values.push(value);
+        validate(path)?;
+
+        let source = std::fs::read_to_string(path).unwrap();
+        let tokens = Lexer::new(&source).lex()?;
+        let (stmts, errors) = Parser::new(tokens).parse();
+
+        if !errors.is_empty() {
+            return Err(errors.join("\n"));
         }
+
+        let mut interpreter = Interpreter::new();
+        interpreter.interpret(&stmts)?;
+
+        let module = Object::new(None, HashMap::new(), None);
+        for (name, value) in interpreter.env.borrow().values.borrow().iter() {
+            module.set(name.clone(), value.clone());
+        }
+
+        Ok(Value::Object(Rc::new(RefCell::new(module))))
     }
 
-    // get all the values from a module by interpeting it
+    pub fn validate(path: &Path) -> Result<(), String> {
+        // if path.is_relative() {
+        //     return Err("relative paths are not supported".to_string());
+        // }
+        if !path.exists() {
+            return Err(format!("module '{}' not found", path.display()));
+        }
+        if !path.is_file() {
+            return Err(format!("module '{}' is not a file", path.display()));
+        }
+        Ok(())
+    }
+
+    pub fn load_io() -> Value {
+        use std::io::Write;
+        let io_module =
+            Object::new(Some("IO".to_string()), HashMap::new(), None);
+        io_module.set(
+            "input".to_string(),
+            Value::Builtin {
+                name: "input".to_string(),
+                call: |args: Vec<Value>| {
+                    for arg in args {
+                        print!("{}", arg);
+                    }
+                    std::io::stdout().flush().unwrap();
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input).unwrap();
+                    Ok(Value::String(input.trim().to_string()))
+                },
+            },
+        );
+        Value::Object(Rc::new(RefCell::new(io_module)))
+    }
 }

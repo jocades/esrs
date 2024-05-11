@@ -1,13 +1,14 @@
 let mod = import ("mod.e")
+let other = import ("other.e")
 
 echo("mod", mod)
+echo("other", other)
 
-echo("main", time())
+echo("mod.var", mod.var)
 
-for key in mod {
-  if type(mod[key]) == "function" {
-    echo("mod." + key, mod[key]())
-  } else {
-    echo("mod." + key, mod[key])
-  }
-}
+mod.var = 2
+echo("mod.var", mod.var)
+
+mod.get()
+mod.set(3)
+mod.get()
