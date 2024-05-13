@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[macro_use]
 extern crate lazy_static;
 
@@ -315,13 +317,13 @@ mod lexer {
             }
 
             if self.eof() {
-                return Err("unterminated string".to_string());
+                return Err("unterminated string".into());
             }
 
             self.eat();
 
             let value = &self.source[self.start + 1..self.index - 1];
-            self.add_token_value(TokenKind::Str, value.to_string());
+            self.add_token_value(TokenKind::Str, value.into());
             Ok(())
         }
 
@@ -436,12 +438,9 @@ mod parser {
                     self.eat();
                     self.let_declaration()
                 }
-                Fn => {
-                    if self.match_next(&Identifier) {
-                        self.function_declaration("function")
-                    } else {
-                        Err(self.error("expected function declaration"))
-                    }
+                Fn if self.check_next(&Identifier) => {
+                    self.eat();
+                    self.function_declaration("function")
                 }
                 _ => self.statement(),
             }
@@ -451,9 +450,12 @@ mod parser {
             let mut variables = Vec::new();
             loop {
                 variables.push(
-                    self.expect(&Identifier, "expected identifier")?
-                        .value
-                        .clone(),
+                    self.expect(
+                        &Identifier,
+                        "expected identifier after 'let'",
+                    )?
+                    .value
+                    .clone(),
                 );
                 if !self.matches(&[Comma]) {
                     break;
@@ -472,7 +474,7 @@ mod parser {
                 }
 
                 if variables.len() != initializers.len() {
-                    return Err(self.error(&format!(
+                    return Err(self.error(format!(
                         "expected {} initializers, got {}",
                         variables.len(),
                         initializers.len()
@@ -491,10 +493,8 @@ mod parser {
         }
 
         fn function_declaration(&mut self, kind: &str) -> ParseResult<Stmt> {
-            let name = self.expect(
-                &Identifier,
-                &format!("expected {} after name", kind),
-            )?;
+            let name = self
+                .expect(&Identifier, format!("expected {} after name", kind))?;
 
             Ok(Stmt::Function {
                 name: name.clone(),
@@ -559,10 +559,6 @@ mod parser {
                     self.eat();
                     self.if_statement()
                 }
-                /* Import => {
-                    self.eat();
-                    self.import_statement()
-                } */
                 Loop => {
                     self.eat();
                     self.loop_statement()
@@ -639,20 +635,11 @@ mod parser {
             self.check_noop(&condition)?;
             self.expect(
                 &LBrace,
-                &format!("expected '{{' after {kind} condition"),
+                format!("expected '{{' after {kind} condition"),
             )?;
             let body = self.block()?;
             Ok((condition, body))
         }
-
-        /* fn import_statement(&mut self) -> ParseResult<Stmt> {
-            let path = self
-                .expect(&Str, "expected string literal after 'import'")?
-                .value
-                .clone();
-
-            Ok(Stmt::Import { path })
-        } */
 
         fn loop_statement(&mut self) -> ParseResult<Stmt> {
             self.expect(&LBrace, "expected '{' after 'loop'")?;
@@ -807,7 +794,7 @@ mod parser {
         }
 
         fn factor(&mut self) -> ParseResult<Expr> {
-            let mut expr = self.object()?;
+            let mut expr = self.unary()?;
 
             while self.matches(&[Star, Slash]) {
                 let op = self.prev().clone();
@@ -820,61 +807,6 @@ mod parser {
             }
 
             Ok(expr)
-        }
-
-        fn object(&mut self) -> ParseResult<Expr> {
-            if !self.matches(&[LBrace]) {
-                return self.list();
-            }
-
-            let mut props = Vec::new();
-
-            while self.at().kind != RBrace {
-                let key = self
-                    .expect(&Identifier, "expected identifier key")?
-                    .clone();
-
-                if self.matches(&[Comma]) {
-                    props.push((key, None));
-                    continue;
-                } else if self.at().kind == RBrace {
-                    // allows shorthand { key }
-                    props.push((key, None));
-                    break;
-                }
-
-                self.expect(&Colon, "expected ':' after object key")?;
-
-                let value = self.expression()?;
-                props.push((key, Some(value)));
-
-                if self.at().kind != RBrace {
-                    self.expect(&Comma, "expected ',' after object value")?;
-                }
-            }
-
-            self.expect(&RBrace, "expected '}' after object declaration")?;
-
-            Ok(Expr::Object { props })
-        }
-
-        fn list(&mut self) -> ParseResult<Expr> {
-            if !self.matches(&[LBracket]) {
-                return self.unary();
-            }
-
-            let mut values = Vec::new();
-
-            while self.at().kind != RBracket {
-                values.push(self.expression()?);
-                if !self.matches(&[Comma]) {
-                    break;
-                }
-            }
-
-            self.expect(&RBracket, "Expected ']' after list declaration")?;
-
-            Ok(Expr::List(values))
         }
 
         fn unary(&mut self) -> ParseResult<Expr> {
@@ -944,6 +876,53 @@ mod parser {
             })
         }
 
+        fn object(&mut self) -> ParseResult<Expr> {
+            let mut props = vec![];
+
+            while self.at().kind != RBrace {
+                let key = self
+                    .expect(&Identifier, "expected identifier key")?
+                    .clone();
+
+                if self.matches(&[Comma]) {
+                    props.push((key, None));
+                    continue;
+                } else if self.at().kind == RBrace {
+                    // allows shorthand { key }
+                    props.push((key, None));
+                    break;
+                }
+
+                self.expect(&Colon, "expected ':' after object key")?;
+
+                let value = self.expression()?;
+                props.push((key, Some(value)));
+
+                if self.at().kind != RBrace {
+                    self.expect(&Comma, "expected ',' after object value")?;
+                }
+            }
+
+            self.expect(&RBrace, "expected '}' after object literal")?;
+
+            Ok(Expr::Object { props })
+        }
+
+        fn list(&mut self) -> ParseResult<Expr> {
+            let mut values = Vec::new();
+
+            while self.at().kind != RBracket {
+                values.push(self.expression()?);
+                if !self.matches(&[Comma]) {
+                    break;
+                }
+            }
+
+            self.expect(&RBracket, "Expected ']' after list")?;
+
+            Ok(Expr::List(values))
+        }
+
         fn primary(&mut self) -> ParseResult<Expr> {
             match self.at().kind {
                 True => {
@@ -974,12 +953,21 @@ mod parser {
                     self.eat();
                     self.function_body("lambda")
                 }
+                LBracket => {
+                    self.eat();
+                    self.list()
+                }
+                LBrace => {
+                    self.eat();
+                    self.object()
+                }
                 LParen => {
                     self.eat();
                     let expr = self.expression()?;
                     self.expect(&RParen, "expected ')' after expression")?;
                     Ok(expr)
                 }
+
                 // _ => Err(self.error("expected expression")),
                 _ => Ok(Expr::Noop),
             }
@@ -1033,7 +1021,7 @@ mod parser {
         fn expect(
             &mut self,
             expected: &TokenKind,
-            message: &str,
+            message: impl Into<String>,
         ) -> ParseResult<&Token> {
             if self.check(expected) {
                 return Ok(self.eat());
@@ -1052,8 +1040,8 @@ mod parser {
             Ok(())
         }
 
-        fn error(&self, message: &str) -> String {
-            format!("Parse error: {} at {:?}.", message, self.at())
+        fn error(&self, message: impl Into<String>) -> String {
+            format!("Parse error: {} at {:?}.", message.into(), self.at())
         }
 
         fn eof(&self) -> bool {
@@ -1106,6 +1094,72 @@ pub mod value {
         Function(Rc<RefCell<Function>>),
         List(Rc<RefCell<Vec<Value>>>),
         Object(Rc<RefCell<Object>>),
+        // instead of using list and object as separate values
+        // make everything an esobject so lists, and strings have methods we can call.
+        // EsObject(EsObject),
+        // List(EsObject<Vec<Value>>),
+        // Str(EsObject<Str>),
+    }
+
+    fn test() {}
+
+    #[derive(Debug, PartialEq, Clone)]
+    struct EsObject<T> {
+        pub value: T,
+        pub props: HashMap<String, Value>,
+    }
+
+    impl EsObject<Value> {
+        fn new_object() -> Self {
+            EsObject {
+                value: Value::Nil,
+                props: HashMap::new(),
+            }
+        }
+
+        fn get(&self, key: &str) -> Option<Value> {
+            self.props.get(key).cloned()
+        }
+
+        fn set(&mut self, key: impl Into<String>, value: Value) {
+            self.props.insert(key.into(), value);
+        }
+    }
+
+    // #[derive(Debug, PartialEq, Clone)]
+    // struct List;
+
+    impl EsObject<Vec<Value>> {
+        fn new_list() -> Self {
+            EsObject {
+                value: vec![],
+                props: HashMap::new(),
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Clone)]
+    struct Str(String);
+
+    impl EsObject<Str> {
+        fn new_string(value: String) -> Self {
+            EsObject {
+                value: Str(value),
+                props: HashMap::new(),
+            }
+        }
+
+        fn upper(&self) -> Value {
+            Value::String(self.value.0.to_uppercase())
+        }
+    }
+
+    pub trait Callable {
+        fn call(
+            &self,
+            interpreter: &mut Interpreter,
+            args: Vec<Value>,
+        ) -> RuntimeResult;
     }
 
     #[derive(Debug, PartialEq)]
@@ -1116,7 +1170,23 @@ pub mod value {
         pub closure: EnvRef,
     }
 
+    pub type FunctionRef = Rc<RefCell<Function>>;
+
     impl Function {
+        pub fn new(
+            name: Option<String>,
+            params: Vec<Token>,
+            body: Vec<Stmt>,
+            closure: EnvRef,
+        ) -> FunctionRef {
+            Rc::new(RefCell::new(Function {
+                name,
+                params,
+                body,
+                closure,
+            }))
+        }
+
         pub fn call(
             &self,
             interpreter: &mut Interpreter,
@@ -1142,23 +1212,39 @@ pub mod value {
             }
         }
 
-        pub fn bind(&self, instance: Value) -> Value {
+        pub fn bind(&self, instance: Object) -> Value {
             let env = Environment::new(Some(Rc::clone(&self.closure)));
-            env.borrow_mut().define("this".to_string(), instance);
-            Value::Function(Rc::new(RefCell::new(Function {
-                name: self.name.clone(),
-                params: self.params.clone(),
-                body: self.body.clone(),
-                closure: env,
-            })))
+            env.borrow_mut().define(
+                "this".to_string(),
+                Value::Object(Rc::new(RefCell::new(instance))),
+            );
+
+            Value::Function(Function::new(
+                self.name.clone(),
+                self.params.clone(),
+                self.body.clone(),
+                env,
+            ))
         }
     }
+
+    pub type ObjectRef = Rc<RefCell<Object>>;
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct Object {
         pub name: Option<String>,
         pub props: Rc<RefCell<HashMap<String, Value>>>,
-        pub proto: Option<Rc<RefCell<Object>>>,
+        pub proto: Option<ObjectRef>,
+    }
+
+    impl Default for Object {
+        fn default() -> Self {
+            Object {
+                name: None,
+                props: Rc::new(RefCell::new(HashMap::new())),
+                proto: None,
+            }
+        }
     }
 
     impl Object {
@@ -1166,33 +1252,69 @@ pub mod value {
             name: Option<String>,
             props: HashMap<String, Value>,
             proto: Option<Object>,
-        ) -> Self {
-            Object {
+        ) -> ObjectRef {
+            Rc::new(RefCell::new(Object {
                 name,
                 props: Rc::new(RefCell::new(props)),
                 proto: proto.map(|proto| Rc::new(RefCell::new(proto))),
-            }
+            }))
         }
 
-        pub fn get(&mut self, key: &str) -> Option<Value> {
-            if let Some(value) = self.props.borrow().get(key) {
-                if let Value::Function(func) = value {
-                    return Some(func.borrow().bind(Value::Object(Rc::new(
-                        RefCell::new(self.clone()),
-                    ))));
+        pub fn get(&self, key: impl Into<String>) -> Option<Value> {
+            let key = key.into();
+
+            if key == "__proto" {
+                return self
+                    .proto
+                    .as_ref()
+                    .map(|proto| Value::Object(proto.clone()));
+            }
+
+            self.props
+                .borrow()
+                .get(&key)
+                .map(|value| match value {
+                    Value::Function(func) => func.borrow().bind(self.clone()),
+                    _ => value.clone(),
+                })
+                .or_else(|| {
+                    self.proto
+                        .as_ref()
+                        .and_then(|proto| proto.borrow().get(key))
+                })
+        }
+
+        pub fn set(
+            &mut self,
+            key: impl Into<String>,
+            value: Value,
+        ) -> Result<(), String> {
+            let key = key.into();
+
+            if key == "__proto" {
+                self.proto = match value {
+                    Value::Object(obj) => Some(obj),
+                    _ => return Err("__proto must be an object".into()),
+                };
+            } else {
+                self.props.borrow_mut().insert(key, value);
+            }
+            Ok(())
+        }
+
+        pub fn call(
+            &self,
+            interpreter: &mut Interpreter,
+            args: Vec<Value>,
+        ) -> RuntimeResult {
+            match self.get("__call") {
+                Some(Value::Function(func)) => {
+                    func.borrow().call(interpreter, args)
                 }
-                return Some(value.clone());
+                _ => Err(Runtime::Error(
+                    "object does not implement __call".into(),
+                )),
             }
-
-            if let Some(proto) = self.proto.as_ref() {
-                return proto.borrow_mut().get(key);
-            }
-
-            None
-        }
-
-        pub fn set(&self, key: String, value: Value) {
-            self.props.borrow_mut().insert(key, value);
         }
     }
 
@@ -1320,8 +1442,6 @@ mod interpreter {
     use std::collections::HashMap;
     use std::rc::Rc;
 
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
     use crate::value::{Function, Object};
     use crate::BUILTINS;
 
@@ -1381,9 +1501,7 @@ mod interpreter {
                     Err(Runtime::Break(msg)) => return Err(msg),
                     Err(Runtime::Return(_, msg)) => return Err(msg),
                     Err(Runtime::Import(value)) => {
-                        self.env
-                            .borrow_mut()
-                            .define("module".to_string(), value);
+                        self.env.borrow_mut().define("module".into(), value);
                     }
                 }
             }
@@ -1403,7 +1521,7 @@ mod interpreter {
                     self.exec_block_with_closure(stmts, env)
                 }
                 Stmt::Break(_token) => Err(Runtime::Break(
-                    "break statement used outside of loop".to_string(),
+                    "break statement used outside of loop".into(),
                 )),
                 Stmt::For {
                     variable,
@@ -1446,11 +1564,6 @@ mod interpreter {
                         None => Ok(Value::Nil),
                     }
                 }
-                /* Stmt::Import { path } => {
-                    let module = self.load_module(path)?;
-                    self.env.borrow_mut().define(path.clone(), module);
-                    Ok(Value::Nil)
-                } */
                 Stmt::Let {
                     variables,
                     initializers,
@@ -1481,7 +1594,7 @@ mod interpreter {
                     };
                     Err(Runtime::Return(
                         value,
-                        "return statement used outside of function".to_string(),
+                        "return statement used outside of function".into(),
                     ))
                 }
                 Stmt::While { condition, body } => {
@@ -1507,42 +1620,85 @@ mod interpreter {
                     Ok(value)
                 }
                 Expr::Call { callee, args } => {
+                    if let Expr::Get { object, name } = callee.as_ref() {
+                        match self.evaluate(object)? {
+                            Value::List(items) => match name.value.as_str() {
+                                "push" => {
+                                    if args.len() != 1 {
+                                        return Err(Runtime::Error(format!(
+                                            "Expected 1 argument, got {}",
+                                            args.len()
+                                        )));
+                                    }
+                                    items
+                                        .borrow_mut()
+                                        .push(self.evaluate(&args[0])?);
+                                    return Ok(Value::Nil);
+                                }
+                                "pop" => {
+                                    if args.len() != 0 {
+                                        return Err(Runtime::Error(format!(
+                                            "Expected 0 arguments, got {}",
+                                            args.len()
+                                        )));
+                                    }
+                                    return Ok(items
+                                        .borrow_mut()
+                                        .pop()
+                                        .unwrap_or(Value::Nil));
+                                }
+                                other => {
+                                    return Err(Runtime::Error(format!(
+                                        "List has no method '{other}'",
+                                    )));
+                                }
+                            },
+                            Value::String(s) => match name.value.as_str() {
+                                "upper" => {
+                                    return Ok(Value::String(s.to_uppercase()));
+                                }
+                                other => {
+                                    return Err(Runtime::Error(format!(
+                                        "String has no method '{other}'",
+                                    )));
+                                }
+                            },
+                            _ => (),
+                        }
+                    }
+
                     let callee = self.evaluate(callee)?;
                     let args = args
                         .iter()
                         .map(|arg| self.evaluate(arg))
                         .collect::<Result<Vec<_>, _>>()?;
+
                     match callee {
                         Value::Builtin { call, .. } => {
                             call(args).map_err(Runtime::Error)
                         }
                         Value::Function(func) => func.borrow().call(self, args),
-                        _ => Err(Runtime::Error(
-                            "can only call functions".to_string(),
-                        )),
+                        Value::Object(obj) => obj.borrow().call(self, args),
+                        other => Err(Runtime::Error(format!(
+                            "cannot call value: {other}"
+                        ))),
                     }
                 }
                 Expr::Function { params, body } => {
-                    Ok(Value::Function(Rc::new(RefCell::new(Function {
-                        name: None,
-                        params: params.clone(),
-                        body: body.clone(),
-                        closure: Rc::clone(&self.env),
-                    }))))
+                    Ok(Value::Function(Function::new(
+                        None,
+                        params.clone(),
+                        body.clone(),
+                        Rc::clone(&self.env),
+                    )))
                 }
                 Expr::Get { object, name } => match self.evaluate(object)? {
                     Value::Object(obj) => {
-                        match obj.borrow_mut().get(&name.value) {
-                            Some(value) => Ok(value),
-                            None => Err(Runtime::Error(format!(
-                                "undefined property '{}'",
-                                name.value
-                            ))),
-                        }
+                        Ok(obj.borrow().get(&name.value).unwrap_or(Value::Nil))
                     }
-                    _ => Err(Runtime::Error(
-                        "invalid property access".to_string(),
-                    )),
+                    other => Err(Runtime::Error(format!(
+                        "can only access properties of objects, found: {other}",
+                    ))),
                 },
                 Expr::GetComputed { object, prop } => {
                     let object = self.evaluate(object)?;
@@ -1555,31 +1711,25 @@ mod interpreter {
                                     Ok(values.borrow()[index].clone())
                                 } else {
                                     Err(Runtime::Error(
-                                        "index out of bounds".to_string(),
+                                        "index out of bounds".into(),
                                     ))
                                 }
                             }
                             _ => Err(Runtime::Error(
-                                "invalid index, expected number".to_string(),
+                                "invalid index, expected number".into(),
                             )),
                         },
                         Value::Object(obj) => match prop {
                             Value::String(key) => {
-                                match obj.borrow_mut().get(&key) {
-                                    Some(value) => Ok(value),
-                                    None => Err(Runtime::Error(format!(
-                                        "undefined property '{}'",
-                                        key
-                                    ))),
-                                }
+                                Ok(obj.borrow().get(&key).unwrap_or(Value::Nil))
                             }
                             _ => Err(Runtime::Error(
-                                "property key must be a string".to_string(),
+                                "property key must be a string".into(),
                             )),
                         },
-                        _ => Err(Runtime::Error(
-                            "invalid property access".to_string(),
-                        )),
+                        other => Err(Runtime::Error(format!(
+                        "can only access properties of objects, found: {other}",
+                    ))),
                     }
                 }
                 Expr::Literal(value) => Ok(value.into()),
@@ -1626,8 +1776,11 @@ mod interpreter {
                             }
                         }
                     }
-                    let object = Object::new(None, properties, None);
-                    Ok(Value::Object(Rc::new(RefCell::new(object))))
+                    Ok(Value::Object(Object::new(
+                        None,
+                        properties,
+                        Some(Object::default()),
+                    )))
                 }
                 Expr::Range(start, end) => {
                     let start = self.evaluate(start)?;
@@ -1644,11 +1797,12 @@ mod interpreter {
                     match object {
                         Value::Object(obj) => {
                             obj.borrow_mut()
-                                .set(name.value.clone(), value.clone());
+                                .set(&name.value, value.clone())
+                                .map_err(Runtime::Error)?;
                             Ok(value)
                         }
                         _ => Err(Runtime::Error(
-                            "invalid property access".to_string(),
+                            "invalid property access".into(),
                         )),
                     }
                 }
@@ -1669,26 +1823,28 @@ mod interpreter {
                                     Ok(value)
                                 } else {
                                     Err(Runtime::Error(
-                                        "index out of bounds".to_string(),
+                                        "index out of bounds".into(),
                                     ))
                                 }
                             }
                             _ => Err(Runtime::Error(
-                                "invalid index, expected number".to_string(),
+                                "invalid index, expected number".into(),
                             )),
                         },
                         Value::Object(obj) => match prop {
                             Value::String(key) => {
-                                obj.borrow_mut().set(key, value.clone());
+                                obj.borrow_mut()
+                                    .set(&key, value.clone())
+                                    .map_err(Runtime::Error)?;
                                 Ok(value)
                             }
                             _ => Err(Runtime::Error(
-                                "property key must be a string".to_string(),
+                                "property key must be a string".into(),
                             )),
                         },
-                        _ => Err(Runtime::Error(
-                            "invalid property access".to_string(),
-                        )),
+                        other => Err(Runtime::Error(format!(
+                        "can only access properties of objects, found: {other}",
+                    ))),
                     }
                 }
                 Expr::Variable(name) => self.env.borrow_mut().get(name),
@@ -1915,19 +2071,16 @@ mod interpreter {
     }
 }
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
-
 use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser;
 
-use crate::value::{Object, Value};
+use crate::value::Value;
 
 pub struct Es {
     had_error: bool,
     had_runtime_error: bool,
     interpreter: Interpreter,
-    modules: HashMap<String, Value>,
     config: Config,
 }
 
@@ -1941,7 +2094,6 @@ impl Es {
             had_error: false,
             had_runtime_error: false,
             interpreter: Interpreter::new(),
-            modules: HashMap::new(),
             config: Config { debug: false },
         }
     }
@@ -2138,7 +2290,7 @@ lazy_static! {
 }
 
 mod module {
-    use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc};
+    use std::{cell::RefCell, path::Path, rc::Rc};
 
     use crate::{
         interpreter::Interpreter,
@@ -2150,14 +2302,8 @@ mod module {
     pub fn load(path: &str) -> Result<Value, String> {
         let path = std::path::Path::new(path);
 
-        println!("loading module: {}", path.display());
-
-        // if initial path is std then ust std lib for io, for example.
-        // match std/io, std/math, etc..
         if path.starts_with("std") {
-            println!("loading std module");
             let key = path.file_stem().unwrap().to_str().unwrap();
-            println!("key: {}", key);
             match key {
                 "io" => return Ok(load_io()),
                 _ => {
@@ -2182,18 +2328,15 @@ mod module {
         let mut interpreter = Interpreter::new();
         interpreter.interpret(&stmts)?;
 
-        let module = Object::new(None, HashMap::new(), None);
+        let mut module = Object::default();
         for (name, value) in interpreter.env.borrow().values.borrow().iter() {
-            module.set(name.clone(), value.clone());
+            module.set(name, value.clone())?;
         }
 
         Ok(Value::Object(Rc::new(RefCell::new(module))))
     }
 
     pub fn validate(path: &Path) -> Result<(), String> {
-        // if path.is_relative() {
-        //     return Err("relative paths are not supported".to_string());
-        // }
         if !path.exists() {
             return Err(format!("module '{}' not found", path.display()));
         }
@@ -2205,23 +2348,25 @@ mod module {
 
     pub fn load_io() -> Value {
         use std::io::Write;
-        let io_module =
-            Object::new(Some("IO".to_string()), HashMap::new(), None);
-        io_module.set(
-            "input".to_string(),
-            Value::Builtin {
-                name: "input".to_string(),
-                call: |args: Vec<Value>| {
-                    for arg in args {
-                        print!("{}", arg);
-                    }
-                    std::io::stdout().flush().unwrap();
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input).unwrap();
-                    Ok(Value::String(input.trim().to_string()))
+        let mut io_module = Object::default();
+        io_module.name = Some("IO".to_string());
+        io_module
+            .set(
+                "input".to_string(),
+                Value::Builtin {
+                    name: "input".to_string(),
+                    call: |args: Vec<Value>| {
+                        for arg in args {
+                            print!("{}", arg);
+                        }
+                        std::io::stdout().flush().unwrap();
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input).unwrap();
+                        Ok(Value::String(input.trim().to_string()))
+                    },
                 },
-            },
-        );
+            )
+            .unwrap();
         Value::Object(Rc::new(RefCell::new(io_module)))
     }
 }
