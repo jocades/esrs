@@ -9,6 +9,6 @@ echo("mod.var", mod.var)
 mod.var = 2
 echo("mod.var", mod.var)
 
-mod.get()
-mod.set(3)
-mod.get()
+mod.obj.get()
+mod.obj.set(3)
+mod.obj.get()

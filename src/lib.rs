@@ -286,7 +286,7 @@ mod lexer {
                     self.line += 1;
                 }
                 _ => {
-                    return Err(format!("unexpected character '{}'", c));
+                    return Err(format!("unexpected character '{c}'"));
                 }
             }
 
@@ -369,7 +369,7 @@ mod lexer {
             let value = &self.source[self.start..self.index];
             self.tokens.push(Token {
                 kind,
-                value: value.to_string(),
+                value: value.into(),
                 line: self.line,
                 column: self.column,
             });
@@ -514,9 +514,7 @@ mod parser {
                 //     params,
                 //     body: vec![self.expression()?],
                 // }),
-                _ => {
-                    Err(format!("expected '{{' or '->'  before {} body", kind))
-                }
+                _ => Err(format!("expected '{{' or '->'  before {kind} body")),
             }
         }
 
@@ -891,12 +889,24 @@ mod parser {
                     // allows shorthand { key }
                     props.push((key, None));
                     break;
+                } else if self.check_next(&LParen) {
+                    self.eat();
+                    let value = Expr::Function {
+                        params: self.function_params()?,
+                        body: self.block()?,
+                    };
+                    props.push((key, Some(value)));
+                    continue;
                 }
 
                 self.expect(&Colon, "expected ':' after object key")?;
-
                 let value = self.expression()?;
                 props.push((key, Some(value)));
+
+                // self.expect(&Colon, "expected ':' after object key")?;
+                //
+                // let value = self.expression()?;
+                // props.push((key, Some(value)));
 
                 if self.at().kind != RBrace {
                     self.expect(&Comma, "expected ',' after object value")?;
@@ -1621,41 +1631,150 @@ mod interpreter {
                 }
                 Expr::Call { callee, args } => {
                     if let Expr::Get { object, name } = callee.as_ref() {
-                        match self.evaluate(object)? {
-                            Value::List(items) => match name.value.as_str() {
-                                "push" => {
-                                    if args.len() != 1 {
-                                        return Err(Runtime::Error(format!(
-                                            "Expected 1 argument, got {}",
-                                            args.len()
-                                        )));
-                                    }
-                                    items
-                                        .borrow_mut()
-                                        .push(self.evaluate(&args[0])?);
-                                    return Ok(Value::Nil);
-                                }
-                                "pop" => {
-                                    if args.len() != 0 {
-                                        return Err(Runtime::Error(format!(
-                                            "Expected 0 arguments, got {}",
-                                            args.len()
-                                        )));
-                                    }
-                                    return Ok(items
-                                        .borrow_mut()
-                                        .pop()
-                                        .unwrap_or(Value::Nil));
-                                }
-                                other => {
+                        let mut list_methods: HashMap<
+                            &str,
+                            fn(
+                                Rc<RefCell<Vec<Value>>>,
+                                Vec<Value>,
+                                interpreter: &mut Interpreter,
+                            ) -> RuntimeResult,
+                        > = HashMap::new();
+
+                        list_methods.insert("push", |items, args, _| {
+                            if args.len() != 1 {
+                                return Err(Runtime::Error(format!(
+                                    "expected 1 argument, got {}",
+                                    args.len()
+                                )));
+                            }
+                            items.borrow_mut().push(args[0].clone());
+                            Ok(Value::Nil)
+                        });
+
+                        list_methods.insert("pop", |items, args, _| {
+                            if !args.is_empty() {
+                                return Err(Runtime::Error(format!(
+                                    "expected 0 arguments, got {}",
+                                    args.len()
+                                )));
+                            }
+                            Ok(items.borrow_mut().pop().unwrap_or(Value::Nil))
+                        });
+                        list_methods.insert(
+                            "map",
+                            |items, args, interpreter| {
+                                if args.len() != 1 {
                                     return Err(Runtime::Error(format!(
-                                        "List has no method '{other}'",
+                                        "expected 1 argument, got {}",
+                                        args.len()
                                     )));
                                 }
+
+                                let Value::Function(func) = &args[0] else {
+                                    return Err(Runtime::Error(
+                                        "expected function argument".into(),
+                                    ));
+                                };
+
+                                let mut new_items = Vec::new();
+                                for (i, item) in
+                                    items.borrow().iter().enumerate()
+                                {
+                                    let value = func.borrow().call(
+                                        interpreter,
+                                        vec![
+                                            item.clone(),
+                                            Value::Number(i as f64),
+                                        ],
+                                    )?;
+                                    new_items.push(value);
+                                }
+                                Ok(Value::List(Rc::new(RefCell::new(
+                                    new_items,
+                                ))))
                             },
+                        );
+
+                        list_methods.insert(
+                            "for_each",
+                            |items, args, interpreter| {
+                                if args.len() != 1 {
+                                    return Err(Runtime::Error(format!(
+                                        "expected 1 argument, got {}",
+                                        args.len()
+                                    )));
+                                }
+
+                                let Value::Function(func) = &args[0] else {
+                                    return Err(Runtime::Error(
+                                        "expected function argument".into(),
+                                    ));
+                                };
+
+                                for (i, item) in
+                                    items.borrow().iter().enumerate()
+                                {
+                                    func.borrow().call(
+                                        interpreter,
+                                        vec![
+                                            item.clone(),
+                                            Value::Number(i as f64),
+                                        ],
+                                    )?;
+                                }
+                                Ok(Value::Nil)
+                            },
+                        );
+
+                        match self.evaluate(object)? {
+                            Value::List(items) => {
+                                if let Some(method) =
+                                    list_methods.get(name.value.as_str())
+                                {
+                                    return method(
+                                        items,
+                                        args.iter()
+                                            .map(|arg| self.evaluate(arg))
+                                            .collect::<Result<Vec<_>, _>>()?,
+                                        self,
+                                    );
+                                } else {
+                                    return Err(Runtime::Error(format!(
+                                        "List has no method '{}'",
+                                        name.value
+                                    )));
+                                }
+                            }
                             Value::String(s) => match name.value.as_str() {
                                 "upper" => {
                                     return Ok(Value::String(s.to_uppercase()));
+                                }
+                                "split" => {
+                                    if args.len() > 1 {
+                                        return Err(Runtime::Error(format!(
+                                            "expected 1 or 0 arguments, got {}",
+                                            args.len()
+                                        )));
+                                    }
+
+                                    let sep = if args.is_empty() {
+                                        Ok(" ".to_string())
+                                    } else {
+                                        match self.evaluate(&args[0])? {
+                                            Value::String(s) => Ok(s.clone()),
+                                            _ => Err(Runtime::Error(
+                                                "expected string argument"
+                                                    .into(),
+                                            )),
+                                        }
+                                    }?;
+                                    let parts = s
+                                        .split(&sep)
+                                        .map(|s| Value::String(s.into()));
+
+                                    return Ok(Value::List(Rc::new(
+                                        RefCell::new(parts.collect()),
+                                    )));
                                 }
                                 other => {
                                     return Err(Runtime::Error(format!(
@@ -2349,7 +2468,7 @@ mod module {
     pub fn load_io() -> Value {
         use std::io::Write;
         let mut io_module = Object::default();
-        io_module.name = Some("IO".to_string());
+        io_module.name = Some("IO".into());
         io_module
             .set(
                 "input".to_string(),
