@@ -1,18 +1,16 @@
-use std::rc::Rc;
+#[macro_use]
+extern crate lazy_static;
+
+mod ast;
+mod builtins;
+mod environment;
+mod es;
+mod interpreter;
+mod lexer;
+mod parser;
+mod value;
 
 use es::Es;
-
-fn test() {
-    let mut params = vec!["a", "b", "c"];
-    // RC is a reference counted pointer
-    let rc = Rc::new(params);
-    let rc2 = Rc::clone(&rc);
-    println!("{:?}", Rc::strong_count(&rc));
-
-    drop(rc);
-
-    println!("{:?}", Rc::strong_count(&rc2));
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

@@ -1,0 +1,111 @@
+--> Program [
+    Let {
+        variables: [
+            "obj",
+        ],
+        initializers: [
+            Some(
+                Object {
+                    props: [
+                        (
+                            Token {
+                                kind: Identifier,
+                                value: "val",
+                                line: 1,
+                                column: 1,
+                            },
+                            Some(
+                                Literal(
+                                    Number(
+                                        0.0,
+                                    ),
+                                ),
+                            ),
+                        ),
+                        (
+                            Token {
+                                kind: Identifier,
+                                value: "get",
+                                line: 1,
+                                column: 1,
+                            },
+                            Some(
+                                Function {
+                                    params: [],
+                                    body: [
+                                        Expr(
+                                            Get {
+                                                object: Variable(
+                                                    Token {
+                                                        kind: Identifier,
+                                                        value: "this",
+                                                        line: 1,
+                                                        column: 1,
+                                                    },
+                                                ),
+                                                name: Token {
+                                                    kind: Identifier,
+                                                    value: "val",
+                                                    line: 1,
+                                                    column: 1,
+                                                },
+                                            },
+                                        ),
+                                    ],
+                                },
+                            ),
+                        ),
+                        (
+                            Token {
+                                kind: Identifier,
+                                value: "set",
+                                line: 1,
+                                column: 1,
+                            },
+                            Some(
+                                Function {
+                                    params: [
+                                        Token {
+                                            kind: Identifier,
+                                            value: "val",
+                                            line: 1,
+                                            column: 1,
+                                        },
+                                    ],
+                                    body: [
+                                        Expr(
+                                            Set {
+                                                object: Variable(
+                                                    Token {
+                                                        kind: Identifier,
+                                                        value: "this",
+                                                        line: 1,
+                                                        column: 1,
+                                                    },
+                                                ),
+                                                name: Token {
+                                                    kind: Identifier,
+                                                    value: "val",
+                                                    line: 1,
+                                                    column: 1,
+                                                },
+                                                value: Variable(
+                                                    Token {
+                                                        kind: Identifier,
+                                                        value: "val",
+                                                        line: 1,
+                                                        column: 1,
+                                                    },
+                                                ),
+                                            },
+                                        ),
+                                    ],
+                                },
+                            ),
+                        ),
+                    ],
+                },
+            ),
+        ],
+    },
+]
