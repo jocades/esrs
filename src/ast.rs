@@ -28,6 +28,7 @@ pub enum Stmt {
         condition: Rc<Expr>,
         body: Vec<Stmt>,
     },
+    Continue(Token),
     Break(Token),
     Return(Token, Option<Expr>),
 }

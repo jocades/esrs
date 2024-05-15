@@ -172,6 +172,10 @@ impl Parser {
                 let token = self.eat().clone();
                 Ok(Stmt::Break(token))
             }
+            Continue => {
+                let token = self.eat().clone();
+                Ok(Stmt::Continue(token))
+            }
             Return => {
                 self.eat();
                 self.return_statement()

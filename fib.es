@@ -6,7 +6,7 @@ fn fib(n) {
   fib(n - 1) + fib(n - 2)
 }
 
-let N = 30
+let N = 40
 
 let start = time()
 let result = fib(N)

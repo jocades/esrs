@@ -37,46 +37,11 @@ loop {
 
     if !val.is_number() {
       echo("Invalid number")
-      break 
+      continue
     }
 
     val = num(val)
   }
-
-  if len(parts) == 1 {
-    cmd = parts[0]
-  }
-
-  if len(parts) == 1 then
-    cmd = parts[]
-  end
-
-  fn main() {
-    echo("Hello World!")
-  }
-
-  fn main()
-    echo("Hello World!")
-  end
-
-  for i in 0..10 {
-    ...
-  }
-
-  for i in 0..10 do
-    ...
-  end
-
-  loop {
-    echo("loop")
-    break
-  }
-
-  loop
-    echo("loop")
-    break
-  end
-
 
   if !commands[cmd] {
     echo("Command not found")

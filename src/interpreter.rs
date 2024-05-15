@@ -20,6 +20,7 @@ pub struct Config {
 
 pub enum Runtime {
     Error(String),
+    Continue(String),
     Break(String),
     Return(Value, String),
 }
@@ -56,6 +57,7 @@ impl Interpreter {
             match self.execute(stmt) {
                 Ok(value) => result = value,
                 Err(Runtime::Error(msg)) => return Err(msg),
+                Err(Runtime::Continue(msg)) => return Err(msg),
                 Err(Runtime::Break(msg)) => return Err(msg),
                 Err(Runtime::Return(_, msg)) => return Err(msg),
             }
@@ -75,6 +77,10 @@ impl Interpreter {
                 let env = Environment::new(Some(Rc::clone(&self.env)));
                 self.exec_block_with_closure(stmts, env)
             }
+
+            Stmt::Continue(_token) => Err(Runtime::Continue(
+                "continue statement used outside of loop".into(),
+            )),
 
             Stmt::Break(_token) => Err(Runtime::Break(
                 "break statement used outside of loop".into(),
@@ -140,6 +146,7 @@ impl Interpreter {
                 loop {
                     match self.exec_block(body) {
                         Ok(_) => {}
+                        Err(Runtime::Continue(_)) => continue,
                         Err(Runtime::Break(_)) => break,
                         Err(e) => return Err(e),
                     }
@@ -163,6 +170,7 @@ impl Interpreter {
                     for stmt in body {
                         match self.execute(stmt) {
                             Ok(_) => {}
+                            Err(Runtime::Continue(_)) => continue,
                             Err(Runtime::Break(_)) => break,
                             Err(e) => return Err(e),
                         }
@@ -581,7 +589,12 @@ impl Interpreter {
                     self.env
                         .borrow_mut()
                         .define(variable.value.clone(), value.clone());
-                    self.exec_block(body)?;
+                    match self.exec_block(body) {
+                        Ok(_) => {}
+                        Err(Runtime::Continue(_)) => continue,
+                        Err(Runtime::Break(_)) => break,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Value::String(s) => {
@@ -590,7 +603,12 @@ impl Interpreter {
                         variable.value.clone(),
                         Value::String(c.to_string()),
                     );
-                    self.exec_block(body)?;
+                    match self.exec_block(body) {
+                        Ok(_) => {}
+                        Err(Runtime::Continue(_)) => continue,
+                        Err(Runtime::Break(_)) => break,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Value::Object(obj) => {
@@ -599,7 +617,12 @@ impl Interpreter {
                         variable.value.clone(),
                         Value::String(key.clone()),
                     );
-                    self.exec_block(body)?;
+                    match self.exec_block(body) {
+                        Ok(_) => {}
+                        Err(Runtime::Continue(_)) => continue,
+                        Err(Runtime::Break(_)) => break,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             _ => return Err(Runtime::Error("expected iterable".to_string())),
@@ -615,7 +638,7 @@ impl Interpreter {
         value: &Expr,
     ) -> RuntimeResult {
         let value = self.evaluate(value)?;
-        println!("eval_assignment: {op:?} -> {:?}", value);
+        // println!("eval_assignment: {op:?} -> {:?}", value);
         match op.kind {
             TokenKind::Equal => {
                 self.env.borrow_mut().assign(name, value.clone())?;

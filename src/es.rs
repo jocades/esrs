@@ -6,13 +6,6 @@ use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 
-pub struct Es {
-    had_error: bool,
-    had_runtime_error: bool,
-    interpreter: Interpreter,
-    pub config: Config,
-}
-
 pub struct Config {
     pub debug: bool,
     pub ast: bool,
@@ -27,13 +20,41 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    pub fn build(args: &[String]) -> Config {
+        if args.len() > 3 {
+            eprintln!("Usage: es [file] [--debug] [--ast]");
+            std::process::exit(64);
+        }
+
+        let mut config = Config::default();
+
+        for arg in args {
+            match arg.as_str() {
+                "--debug" | "-d" => config.debug = true,
+                "--ast" | "-a" => config.ast = true,
+                _ => {}
+            }
+        }
+
+        config
+    }
+}
+
+pub struct Es {
+    had_error: bool,
+    had_runtime_error: bool,
+    interpreter: Interpreter,
+    pub config: Config,
+}
+
 impl Es {
-    pub fn new() -> Self {
+    pub fn new(config: Config) -> Es {
         Es {
             had_error: false,
             had_runtime_error: false,
             interpreter: Interpreter::new(),
-            config: Config::default(),
+            config,
         }
     }
 
@@ -125,5 +146,16 @@ impl Es {
             ".ast" => self.config.ast = !self.config.ast,
             _ => println!("Unknown command: {command}"),
         }
+    }
+}
+
+pub fn run(args: &[String]) {
+    let config = Config::build(args);
+    let mut es = Es::new(config);
+
+    if args.len() == 2 {
+        es.file(&args[1]);
+    } else {
+        es.repl()
     }
 }

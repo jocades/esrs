@@ -21,9 +21,9 @@ use std::collections::HashMap;
         Identifier, Number, Str,
 
         // Keywords
-        And, Break, Class, Elif, Else, False,
+        And, Break, Class, Continue, Elif, Else, False,
         Fn, For, If, /*Import*/ In, Let, Loop, Nil, Or, Return,
-        Super, /*This*/ True, While,
+        Super, /*This*/ True, While, 
 
         EOF,
     }
@@ -36,6 +36,7 @@ lazy_static! {
         m.insert("and", And);
         m.insert("break", Break);
         m.insert("class", Class);
+        m.insert("continue", Continue);
         m.insert("else", Else);
         m.insert("elif", Elif);
         m.insert("false", False);
